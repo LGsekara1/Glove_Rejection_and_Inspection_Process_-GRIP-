@@ -1,0 +1,8 @@
+grip_env/
+*.pt
+*.onnx
+*.cache
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db

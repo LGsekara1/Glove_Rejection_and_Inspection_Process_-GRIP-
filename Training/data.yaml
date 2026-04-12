@@ -1,0 +1,7 @@
+path: D:/Abdul Rahman/Engineering_UOM/Personal Projects/GRIP/VsCode implementation/Find_gloves.yolov8/Training
+
+train: train/images
+val: valid/images
+
+nc: 1
+names: ['glove']
