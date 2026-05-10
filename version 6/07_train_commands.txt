@@ -1,0 +1,20 @@
+# Train glove detector
+yolo task=detect mode=train model=yolo11n.pt data=glove.yaml epochs=150 imgsz=640 batch=16 patience=30
+
+# If accuracy is not enough and PC GPU can handle it:
+yolo task=detect mode=train model=yolo11s.pt data=glove.yaml epochs=200 imgsz=960 batch=8 patience=40
+
+# Train glove landmark / pose model
+yolo task=pose mode=train model=yolo11n-pose.pt data=glove_pose.yaml epochs=200 imgsz=640 batch=16 patience=40
+
+# Train label defect classifier
+yolo task=classify mode=train model=yolo11n-cls.pt data=label_roi_aug epochs=100 imgsz=224 batch=16 patience=25
+
+# Validate
+yolo task=detect mode=val model=runs/detect/train/weights/best.pt data=glove.yaml
+yolo task=pose mode=val model=runs/pose/train/weights/best.pt data=glove_pose.yaml
+yolo task=classify mode=val model=runs/classify/train/weights/best.pt data=label_roi_aug
+
+# Export later
+yolo export model=best.pt format=onnx imgsz=640
+yolo export model=best.pt format=engine half=True imgsz=640

@@ -1,0 +1,8 @@
+path: /absolute/path/to/glove_pose_dataset
+train: images/train
+val: images/val
+test: images/test
+kpt_shape: [21, 3]
+flip_idx: [0, 17, 18, 19, 20, 13, 14, 15, 16, 9, 10, 11, 12, 5, 6, 7, 8, 1, 2, 3, 4]
+names:
+  0: glove
