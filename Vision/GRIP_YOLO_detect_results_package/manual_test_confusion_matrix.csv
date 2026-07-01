@@ -1,0 +1,6 @@
+,PRED_left_glove,PRED_right_glove,PRED_unclear_glove,PRED_missed,PRED_background
+TRUE_left_glove,8,0,0,0,0
+TRUE_right_glove,0,10,0,0,0
+TRUE_unclear_glove,0,1,39,4,0
+TRUE_missed,0,0,0,0,0
+TRUE_background,2,0,7,0,0

@@ -1,0 +1,8 @@
+path: /content/grip_work/grip_detect_split
+train: images/train
+val: images/val
+test: images/test
+names:
+  0: left_glove
+  1: right_glove
+  2: unclear_glove
