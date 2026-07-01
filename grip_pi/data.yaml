@@ -1,6 +1,0 @@
-path: D:/Abdul Rahman/Engineering_UOM/Personal Projects/GRIP/VsCode implementation/Find_gloves.yolov8/Training_v2
-train: train/images
-val:   valid/images
-
-nc: 2
-names: ['left_glove', 'right_glove']
