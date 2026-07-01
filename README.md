@@ -1,778 +1,376 @@
-# 🧤 GRIP - Glove Rejection and Inspection Process
+# 🧤 GRIP Vision Results - YOLO11n 3-Class Detect Prototype
 
 <div align="center">
 
-![GRIP Banner](https://img.shields.io/badge/GRIP-Glove%20Rejection%20%26%20Inspection%20Process-0D9488?style=for-the-badge&labelColor=0F172A)
+![GRIP Vision](https://img.shields.io/badge/GRIP-Vision%20Model%20Results-0D9488?style=for-the-badge&labelColor=0F172A)
 
-[![Status](https://img.shields.io/badge/Status-Active%20MVP%20Research-F59E0B?style=flat-square)](.)
-[![Current Direction](https://img.shields.io/badge/Current%20Direction-YOLO--Pose%20Keypoints-2563EB?style=flat-square)](.)
-[![Dataset](https://img.shields.io/badge/Dataset-Factory%20Video%20Frames-0D9488?style=flat-square)](.)
-[![Platform](https://img.shields.io/badge/Platform-PC%20→%20Jetson%20Orin%20Nano-7C3AED?style=flat-square)](.)
-[![University](https://img.shields.io/badge/ENTC-University%20of%20Moratuwa-1B3A6B?style=flat-square)](.)
+[![Workflow](https://img.shields.io/badge/Workflow-YOLO11n%203--Class%20Detect-2563EB?style=flat-square)](.)
+[![Task](https://img.shields.io/badge/Task-Left%20%7C%20Right%20%7C%20Unclear-F59E0B?style=flat-square)](.)
+[![Dataset](https://img.shields.io/badge/Dataset-Factory%20Conveyor%20Frames-0D9488?style=flat-square)](.)
+[![Model](https://img.shields.io/badge/Model-best.pt%20%2B%20best.onnx-7C3AED?style=flat-square)](.)
+[![Status](https://img.shields.io/badge/Status-MVP%20Prototype%20Result-E11D48?style=flat-square)](.)
 
-**Automated Computer Vision + SCARA Robotic Quality Control System**  
-*Real-time glove orientation inspection, defect detection, and belt-synchronised rejection*
-
----
-
-### Group MOSFET · ENTC, University of Moratuwa · 2026
-
-| Index | Name |
-|-------|------|
-| 230212H | L.U.A. Gunasekara |
-| 230171E | C.D. Elapatha |
-| 230470U | T.S.R. Peiris |
-| 230318M | J.H.D. Kariyawasam |
-| 230507R | M.F.A. Rahman |
+**Computer Vision results package for the GRIP glove rejection prototype**  
+*YOLO11n detection model trained to classify gloves as LEFT, RIGHT, or UNCLEAR*
 
 </div>
 
 ---
 
-## 📌 Project Status
+## 📌 Folder Purpose
 
-GRIP is an **ongoing engineering prototype**. The project has gone through multiple computer vision approaches, including normal YOLO object detection, left/right object classification, CNN crop classification, and the current YOLO-pose/keypoint-based approach.
+This folder contains the **Vision-stage YOLO detect experiment results** for the GRIP project.
 
-The latest direction is:
+Current GitHub location:
 
 ```text
-YOLO-pose detects glove + anatomical keypoints
-↓
-geometry-based logic decides KEEP / REJECT / MANUAL
-↓
-robot pick command is queued only for confident reject cases
+Glove_Rejection_and_Inspection_Process_-GRIP-/
+└── Vision/
+    └── GRIP_YOLO_detect_results_package/
 ```
 
-The current model is **not production-ready yet**. Detection bounding boxes are working well, but keypoint prediction still needs more consistent annotated data before reliable rejection logic can be added.
+This is the latest MVP computer vision workflow where a YOLO11n detection model was trained to identify:
+
+```text
+0 = left_glove
+1 = right_glove
+2 = unclear_glove
+```
+
+The purpose of this experiment was to create a quick, testable model from real factory conveyor frames and evaluate whether left/right/unclear glove classification is learnable from the current camera dataset.
 
 ---
 
-## 🎯 Project Overview
+## 🧠 Why This YOLO Detect Model Was Used
 
-GRIP, short for **Glove Rejection and Inspection Process**, is a real-time quality inspection system for nitrile glove manufacturing conveyor lines. The system uses a top-down camera to inspect gloves moving on a conveyor and identifies gloves that should be rejected or sent for manual inspection.
+The project previously explored YOLO-pose/keypoints. However, the real glove images are difficult for pose because gloves are not real hands:
 
-The long-term objective is to integrate:
+- gloves are empty and deformable,
+- fingers may be folded together,
+- the thumb is often hidden,
+- many examples are blurred due to conveyor motion,
+- crumpled gloves do not have stable anatomical keypoints.
+
+Because of this, the latest practical MVP uses **YOLO object detection with three classes** instead of relying on keypoints for the urgent test.
+
+The logic is:
 
 ```text
-Camera
-↓
-Computer vision model
-↓
-Decision logic
-↓
-SCARA robot
-↓
-Pneumatic/vacuum gripper
-↓
-Reject/manual inspection bin
+Clear LEFT glove     → allow/pass
+Clear RIGHT glove    → reject/pick
+UNCLEAR glove        → manual/recheck
 ```
 
-The system is designed so that normal gloves continue on the belt, while wrong-hand gloves, label defects, and uncertain cases are removed or flagged without stopping the conveyor.
+This avoids forcing a risky left/right decision when the visual evidence is poor.
 
 ---
 
-## ❗ Problem Being Solved
+## ✅ What Was Completed in This Workflow
 
-| Problem | Effect on Production |
-|--------|----------------------|
-| Left/right glove mix-up | Packaging errors and customer complaints |
-| Label defects | Smudged, missing, or unclear printed information |
-| Manual visual inspection | Fatigue, inconsistency, and missed defects |
-| High belt speed | Difficult to inspect accurately by hand |
-| No automatic defect logging | Hard to track defect rate and improve process |
-
-The initial production target is not to solve every defect class at once. The MVP focuses on **wrong-hand glove rejection** first, then expands to label defect detection and size verification.
-
----
-
-## 🏭 Factory MVP Scenario
-
-The real conveyor setup has two lanes on a wide conveyor. For the first MVP, the system focuses on **one lane only**.
-
-```text
-Right-side lane only
-Expected glove: left glove
-Wrong glove: right glove
-Camera: top-down, fixed over one lane
-Glove orientation: palm-down as much as possible
-```
-
-The centre line between the two conveyor lanes is **not visible** in the camera view because the camera is mounted over only one lane. Therefore, the current approach does not depend on a visible centre line.
-
-### Current data limitation
-
-Early right-glove data was collected from the **left-side lane**, not from the right-side lane where right gloves would be wrong. As a temporary MVP workaround, the project uses:
-
-```text
-left-lane right-glove data
-↓
-180° rotation
-↓
-synthetic right-glove-on-right-lane wrong case
-```
-
-This is useful for early experiments, but it is not treated as final production-quality data. The project still needs real right gloves placed on the right lane for validation.
+| Step | Completed work |
+|---:|---|
+| 1 | Factory video frames were selected for the first urgent vision model test. |
+| 2 | Gloves were annotated with bounding boxes and class labels. |
+| 3 | Three classes were used: `left_glove`, `right_glove`, and `unclear_glove`. |
+| 4 | Existing YOLO-pose style labels were converted to YOLO detect format by keeping only bbox + class. |
+| 5 | A 70/20/10 train/validation/test split was created. |
+| 6 | YOLO11n was trained in Google Colab using Ultralytics. |
+| 7 | The best validation checkpoint was saved as `best.pt`. |
+| 8 | The trained model was exported to ONNX as `best.onnx`. |
+| 9 | Confusion matrices, metric curves, prediction CSV files, and classification reports were generated. |
+| 10 | A detector video tester script was prepared for mixed-video testing. |
 
 ---
 
-## 🏗 System Architecture
+## 📊 Dataset Summary
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                        SENSING LAYER                        │
-│  Top-down USB/global shutter camera                         │
-│  Conveyor belt                                               │
-│  Rotary encoder, planned                                     │
-└───────────────────────────────┬─────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    COMPUTER VISION LAYER                    │
-│  Current: YOLO-pose                                         │
-│  Output: bbox + glove keypoints                             │
-│  Planned decision output: KEEP / REJECT / MANUAL            │
-└───────────────────────────────┬─────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────┐
-│                     CONTROL LAYER                           │
-│  PC decision queue                                          │
-│  UART JSON command to STM32H7                               │
-│  Encoder-based pick timing                                  │
-└───────────────────────────────┬─────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      ACTUATION LAYER                        │
-│  SCARA robot arm                                             │
-│  Pneumatic/vacuum gripper                                    │
-│  Reject bin / manual bin                                     │
-└─────────────────────────────────────────────────────────────┘
-```
+### Annotated class counts before split
+
+| Class | Meaning | Count |
+|---|---|---:|
+| `left_glove` | Visually clear left glove | 117 |
+| `right_glove` | Visually clear right glove | 114 |
+| `unclear_glove` | Crumpled, folded, blurred, partial, or unsafe-to-classify glove | 377 |
+| **Total** |  | **608** |
+
+### Dataset split
+
+| Split | Images |
+|---|---:|
+| Train | 425 |
+| Validation | 121 |
+| Test | 62 |
+| **Total** | **608** |
+
+During training in Colab, the training set was balanced/expanded to reduce the strong class imbalance caused by the larger `unclear_glove` class.
+
+| Stage | Images |
+|---|---:|
+| Original train split | 425 |
+| Balanced training set used by notebook | 825 |
+
+> Validation and test sets were kept separate and were not artificially expanded, so they remain useful for evaluation.
 
 ---
 
-## 🧠 Computer Vision Development Timeline
+## ⚙️ Training Configuration
 
-### 1. Normal YOLO detection
-
-Initial work trained YOLO-style object detection models to detect gloves in factory frames.
-
-**Outcome**
-
-- Bounding box detection worked well.
-- The model could usually locate gloves in the scene.
-- This remains useful as a baseline.
-
-**Limitation**
-
-- Detection alone does not reliably determine whether the glove is left or right.
-
----
-
-### 2. YOLO left/right object classification
-
-The next approach used YOLO with classes such as:
-
-```text
-left_glove
-right_glove
-unclear_glove
-```
-
-**Outcome**
-
-- Validation metrics looked promising on the prepared dataset.
-- Some trained models gave strong mAP values on small validation sets.
-
-**Failure mode**
-
-On real mixed conveyor videos, the model did not generalise reliably. Problems included domain shift, motion blur, camera angle differences, partial gloves near frame edges, different placement/orientation of gloves, missed detections, and overconfidence on wrong classes.
-
-**Conclusion**
-
-Normal YOLO classification was useful for learning, but not robust enough for the final MVP decision.
+| Item | Value |
+|---|---|
+| Base model | `yolo11n.pt` |
+| Task | YOLO object detection |
+| Input image size | 640 |
+| Classes | `left_glove`, `right_glove`, `unclear_glove` |
+| Max epochs | 100 |
+| Early stopping patience | 20 |
+| Best model file | `best.pt` |
+| Final model file | `last.pt` |
+| ONNX export | `best.onnx` |
+| Horizontal flip | Disabled |
+| Reason for disabling flip | Flipping can change apparent glove handedness and corrupt labels |
 
 ---
 
-### 3. YOLO + CNN crop classifier
+## 🚨 Most Important Safety Metric
 
-A two-stage pipeline was tested:
+For this industrial use case, the most dangerous error is:
 
 ```text
-YOLO detects glove bbox
-↓
-crop glove
-↓
-CNN classifies left_glove / right_glove / unclear_glove
+true right_glove predicted as left_glove
 ```
 
-**Observed result**
+Why?
 
-The CNN achieved around **86.7% test accuracy** on a small test split. In that small test set, left/right confusion was low, but the `unclear_glove` class was weak.
+A right glove predicted as left could incorrectly pass along the left-glove lane and create a packaging error. Therefore, this workflow evaluates not only general accuracy, but also the **dangerous right-as-left error**.
 
-**Failure mode**
+General model accuracy is useful, but for deployment the priority is:
 
-When tested on a new mixed real video, the CNN-based pipeline did not perform well enough. The problem was that the CNN depended heavily on crop quality. If YOLO cropped a glove partially, or if the glove was blurred, folded, or placed differently, the CNN prediction became unreliable.
+```text
+Minimize RIGHT → LEFT false passes
+```
 
-**Conclusion**
-
-The CNN route is not the preferred final approach. It may still be useful for small auxiliary classification tasks, but not as the main left/right decision system.
+Uncertain or unclear cases should be sent to manual/recheck instead of being forced into a left/right decision.
 
 ---
 
-### 4. Current direction: YOLO-pose
+## 📈 Vision Results
 
-The current approach uses YOLO-pose to detect a glove and predict anatomical keypoints.
+The result images below are generated from the training and evaluation workflow and are stored in this same folder.
 
-```text
-YOLO-pose
-↓
-bbox + wrist/palm/finger keypoints
-↓
-geometry-based decision
-```
+### 1. Validation Confusion Matrices
 
-This is more explainable because the system can reject a glove based on finger-side geometry rather than relying on a black-box class label.
+<div align="center">
 
----
+<img src="./confusion_matrix.png" alt="YOLO Validation Confusion Matrix" width="48%">
+<img src="./confusion_matrix_normalized.png" alt="YOLO Normalized Validation Confusion Matrix" width="48%">
 
-## 🦴 Current YOLO-Pose Direction
+</div>
 
-### Current object class
-
-The pose model uses only one object class:
-
-```text
-0 = glove
-```
-
-It does **not** use `left_glove` and `right_glove` as YOLO classes.
-
-### Current 7-keypoint schema
-
-```text
-0 = wrist_center
-1 = palm_center
-2 = thumb_tip
-3 = index_tip
-4 = middle_tip
-5 = ring_tip
-6 = pinky_tip
-```
-
-### Current result
-
-The first YOLO-pose model was trained with only about **52 annotated images**:
-
-```text
-26 right-glove frames
-26 left-glove frames
-```
-
-This was enough to test the pipeline but not enough to produce reliable keypoints.
-
-On video testing:
-
-```text
-bbox detection: good
-keypoint prediction: not reliable enough yet
-KEEP/REJECT logic: not ready yet
-```
-
-The model can detect the glove box confidently, but it still confuses some keypoint identities, such as finger tips and palm/wrist points.
+**Purpose:** These show how the YOLO validation predictions are distributed between `left_glove`, `right_glove`, and `unclear_glove`.
 
 ---
 
-## 🔁 Possible Updated Keypoint Schema
+### 2. Manual Test Confusion Matrix
 
-Because the thumb is often hidden in palm-down gloves, the current plan is to reduce dependence on thumb detection.
+<div align="center">
 
-A possible improved MVP keypoint schema is:
+<img src="./manual_test_confusion_matrix.png" alt="Manual Test Confusion Matrix" width="65%">
 
-```text
-0 = wrist_left_edge
-1 = wrist_right_edge
-2 = palm_center
-3 = index_tip
-4 = middle_tip
-5 = ring_tip
-6 = pinky_tip
-```
+</div>
 
-This gives the model stronger palm/wrist orientation information while avoiding over-reliance on a hidden thumb.
-
-Another simplified version is:
-
-```text
-0 = wrist_center
-1 = palm_center
-2 = index_tip
-3 = middle_tip
-4 = ring_tip
-5 = pinky_tip
-```
-
-The next dataset round will decide which schema is easier to annotate consistently and produces more stable predictions.
+**Purpose:** This object-level test matrix is used to inspect real prediction behavior on the held-out test set, including dangerous class confusion.
 
 ---
 
-## ✅ What Worked, What Failed
+### 3. Dataset Label Distribution
 
-### What worked
+<div align="center">
 
-| Attempt | Result |
-|--------|--------|
-| Frame extraction from factory videos | Worked |
-| YOLO glove bounding box detection | Worked well |
-| Dataset splitting and augmentation scripts | Worked |
-| Custom Tkinter annotation/prototype UI | Worked for quick tests |
-| CVAT/Roboflow-style keypoint annotation exploration | Useful for understanding pose annotation |
-| YOLO-pose training pipeline | Successfully trained and ran inference |
-| YOLO-pose video test script | Successfully displayed bbox + skeleton |
+<img src="./labels.jpg" alt="Dataset Label Distribution" width="65%">
 
-### What failed or was not good enough
+</div>
 
-| Attempt | Problem |
-|--------|---------|
-| Direct left/right YOLO classes | Failed to generalise well to new mixed video |
-| CNN crop classifier | Good small test result, but weak on mixed real video |
-| `unclear_glove` CNN class | Too few real examples and poor recall |
-| 7-keypoint pose model with 52 images | Bbox good, keypoints unstable |
-| Thumb-based decision rule | Thumb often hidden in palm-down gloves |
-| Full-lane centre-line logic | Not usable because centre line is not visible in one-lane camera view |
-| Large frame extraction at 0.5 s intervals | Produced too many repeated/empty frames |
+**Purpose:** This shows the dataset distribution and helps identify class imbalance. In this experiment, `unclear_glove` is the dominant class.
 
 ---
 
-## 📊 Current Results
+### 4. Training Metric Curves
 
-These are experimental results from the development process and should not be interpreted as final production performance.
+<div align="center">
 
-| Stage | Result | Status |
-|------|--------|--------|
-| Glove detection | High mAP on prepared validation data | Useful baseline |
-| Left/right YOLO classification | High validation score on prepared data | Not robust enough on new video |
-| CNN cropped classifier | 86.7% test accuracy on small split | Not reliable enough in mixed video |
-| YOLO-pose sanity test | Bbox good, keypoints unstable | Current active direction |
+<img src="./metrics_mAP50(B).png" alt="mAP50 Curve" width="48%">
+<img src="./metrics_mAP50-95(B).png" alt="mAP50-95 Curve" width="48%">
 
----
+<br>
 
-## 📁 Dataset Strategy
+<img src="./metrics_precision(B).png" alt="Precision Curve" width="48%">
+<img src="./metrics_recall(B).png" alt="Recall Curve" width="48%">
 
-### Current recommendation
+</div>
 
-Do not crop individual gloves before YOLO-pose training. Train on frames similar to deployment view:
-
-```text
-raw/fixed-lane frame
-↓
-label every visible glove
-↓
-bbox + keypoints per glove
-```
-
-### Frame extraction settings
-
-Recommended extraction settings:
-
-```text
-Extract every seconds: 2.0
-Blur threshold: 5.0 to 8.0
-Use glove color check: ON
-Min glove color ratio: 0.01
-Reject near-duplicate frames: ON
-Max accepted frames/video: 80 to 120
-```
-
-### Minimum target for next pose dataset
-
-```text
-100 to 150 clean correct-glove examples
-100 to 150 wrong/synthetic wrong-glove examples
-50 difficult or partial examples
-```
-
-Better target:
-
-```text
-300 to 600 labelled frames
-```
-
-Final target:
-
-```text
-1000+ consistently annotated glove instances
-```
+**Purpose:** These curves show training/validation behavior across epochs and help judge whether the model improved, saturated, or overfit.
 
 ---
 
-## ✍️ Annotation Rules
+## 📁 Files in This Results Package
 
-### General rules
-
-- Annotate every visible glove in a frame.
-- Use one class only: `glove`.
-- Draw a tight bounding box around the entire glove.
-- Do not force keypoints when the anatomy is not visible.
-- Bad labels are worse than skipped labels.
-
-### Visibility rules
-
-```text
-Visible = clearly identifiable
-Occluded/uncertain = partly hidden but reasonably estimable
-Missing = cannot identify without guessing
-```
-
-### Current keypoint meaning
-
-```text
-wrist_center: centre of cuff/wrist side
-palm_center: centre of palm body
-thumb_tip: thumb tip if visible
-index_tip: finger closest to thumb side
-middle_tip: middle long finger
-ring_tip: between middle and pinky
-pinky_tip: smallest outer finger
-```
-
-### Training rule
-
-For pose training, disable single-image flips:
-
-```text
-fliplr = 0.0
-flipud = 0.0
-```
-
-Single horizontal or vertical flip can corrupt finger-side geometry unless a correct `flip_idx` is fully verified.
+| File | Description |
+|---|---|
+| `README.md` | This results documentation file |
+| `args.yaml` | Ultralytics training arguments |
+| `data.yaml` | Dataset class names and split configuration |
+| `best.pt` | Best PyTorch YOLO checkpoint selected by validation performance |
+| `last.pt` | Final epoch PyTorch checkpoint |
+| `best.onnx` | ONNX export of the best model for deployment/testing |
+| `results.csv` | Epoch-by-epoch training metrics and losses |
+| `labels.jpg` | Dataset label distribution visualisation |
+| `confusion_matrix.png` | Ultralytics validation confusion matrix |
+| `confusion_matrix_normalized.png` | Normalized validation confusion matrix |
+| `manual_test_predictions.csv` | Object-level predictions on test images |
+| `manual_test_confusion_matrix.csv` | CSV version of manual test confusion matrix |
+| `manual_test_confusion_matrix.png` | Manual test confusion matrix image |
+| `manual_test_classification_report.csv` | Precision, recall, F1-score, and support per class |
+| `metrics_mAP50(B).png` | mAP50 curve |
+| `metrics_mAP50-95(B).png` | mAP50-95 curve |
+| `metrics_precision(B).png` | Precision curve |
+| `metrics_recall(B).png` | Recall curve |
 
 ---
 
-## 🧪 Progress Tracker
+## ▶️ Testing the Model on a Mixed Video
 
-### Dataset and annotation
+The latest model is a **detect model**, not a pose model.
 
-- [x] Factory videos recorded
-- [x] Frame extraction UI/script created
-- [x] Initial left/right normal YOLO dataset created
-- [x] Cropped CNN dataset created
-- [x] Initial YOLO-pose annotation UI tested
-- [x] Initial 52-image YOLO-pose sanity dataset created
-- [ ] Collect real right-glove-on-right-lane wrong examples
-- [ ] Build clean 300–600 image YOLO-pose dataset
-- [ ] Decide final keypoint schema
-- [ ] Annotate more consistent pose data
-- [ ] Add difficult/manual examples separately
+Do not test this `best.pt` using the old pose tester. If the window title says:
 
-### Model experiments
+```text
+GRIP YOLO-Pose Test
+```
 
-- [x] YOLO glove detection baseline
-- [x] Left/right YOLO class experiment
-- [x] CNN crop classifier experiment
-- [x] Initial YOLO-pose training test
-- [x] YOLO-pose video inference test
-- [ ] Retrain YOLO-pose with improved keypoint schema
-- [ ] Validate keypoint stability on unseen video
-- [ ] Implement geometry-based KEEP/REJECT/MANUAL rule
-- [ ] Add tracker to avoid duplicate robot commands
+then the wrong tester script is being used.
 
-### Hardware and integration
+Use the detector tester script instead:
 
-- [ ] Camera exposure/shutter improvement
-- [ ] Better lighting setup
-- [ ] Conveyor speed measurement verification
-- [ ] Camera-to-SCARA distance measurement
-- [ ] Rotary encoder integration
-- [ ] STM32H7 UART command receiver
-- [ ] SCARA pick trajectory
-- [ ] Pneumatic/vacuum end-effector test
-- [ ] End-to-end pick test
+```text
+grip_video_detect_tester.py
+```
 
----
+### Recommended command
 
-## 🐛 Known Issues and Mitigations
+Place the tester script, `best.pt`, and the mixed test video in one folder:
 
-### 1. Keypoints are currently unstable
+```text
+test_folder/
+├── grip_video_detect_tester.py
+├── best.pt
+└── Mixed_Dataset_video.mp4
+```
 
-**Status:** Active.
-
-**Cause:** Too few pose annotations and possibly too much dependence on hidden thumb/finger points.
-
-**Mitigation:** Annotate more clean examples, reduce dependence on thumb, consider wrist-edge + palm-center keypoints, and mark hidden keypoints as missing instead of guessing.
-
-### 2. Bounding boxes work better than keypoints
-
-**Status:** Expected for early dataset.
-
-**Cause:** Detecting a glove object is easier than identifying exact finger anatomy.
-
-**Mitigation:** Keep YOLO-pose approach, improve pose labels, and evaluate keypoint predictions visually before adding robot logic.
-
-### 3. CNN route failed on mixed video
-
-**Status:** Deprioritised.
-
-**Cause:** Cropped classifier depended too much on crop quality and did not generalise well.
-
-**Mitigation:** Do not use CNN as the main decision system. Use pose geometry instead.
-
-### 4. Synthetic wrong-glove data may not match reality
-
-**Status:** Active limitation.
-
-**Cause:** Left-lane right-glove data was rotated to simulate right-glove-on-right-lane cases.
-
-**Mitigation:** Use synthetic data only for MVP testing and collect 50–100 real wrong-glove samples on the right lane before final demo.
-
-### 5. Motion blur and camera quality
-
-**Status:** Active.
-
-**Cause:** Current camera/video has motion blur at conveyor speed.
-
-**Mitigation:** Use stronger lighting, reduce exposure time, use a global shutter camera if possible, and include mild blur examples in training.
-
-### 6. Large empty/repeated frame extraction
-
-**Status:** Resolved by settings.
-
-**Cause:** Extracting every 0.5 seconds from long videos creates thousands of frames.
-
-**Mitigation:** Extract every 2 seconds, use colour filtering, cap frames per video, and inspect contact sheets before annotation.
-
----
-
-## 💻 Installation
+Run:
 
 ```bash
-# Clone repository
-git clone https://github.com/LGsekara1/Glove_Rejection_and_Inspection_Process_-GRIP-.git
-cd Glove_Rejection_and_Inspection_Process_-GRIP-
-
-# Create virtual environment
-py -3.11 -m venv grip_env
-
-# Activate on Windows
-grip_env\Scripts\activate
-
-# Install PyTorch with CUDA
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-# Install project dependencies
-pip install ultralytics opencv-python numpy albumentations pillow tqdm pyyaml scikit-learn pyserial
+python grip_video_detect_tester.py --model best.pt --source Mixed_Dataset_video.mp4 --conf 0.05 --imgsz 960
 ```
 
-Check GPU:
+If the model misses gloves, test with a lower confidence threshold and higher image size:
 
 ```bash
-python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0))"
+python grip_video_detect_tester.py --model best.pt --source Mixed_Dataset_video.mp4 --conf 0.01 --imgsz 1280
 ```
 
----
-
-## ▶️ Running the Current Experiments
-
-### Extract frames for pose annotation
-
-```bash
-python grip_yolo_pose_dataset_ui.py
-```
-
-Recommended extraction settings:
+### Correct terminal output should show
 
 ```text
-Extract every seconds: 2.0
-Blur threshold: 5.0 to 8.0
-Min glove color ratio: 0.01
-Reject near-duplicate frames: ON
-Max accepted frames/video: 80 to 120
+model.task = detect
+model.names = {0: 'left_glove', 1: 'right_glove', 2: 'unclear_glove'}
 ```
 
-### Create YOLO-pose split
-
-```bash
-python 03_create_yolo_pose_split.py
-```
-
-Expected output:
-
-```text
-YOLO_pose_MVP_dataset/
-└── yolo_pose_70_20_10
-    ├── images
-    │   ├── train
-    │   ├── val
-    │   └── test
-    ├── labels
-    │   ├── train
-    │   ├── val
-    │   └── test
-    └── data.yaml
-```
-
-### Train YOLO-pose
-
-```python
-from ultralytics import YOLO
-
-model = YOLO("yolo26s-pose.pt")
-
-model.train(
-    data="data.yaml",
-    epochs=80,
-    imgsz=768,
-    batch=8,
-    fliplr=0.0,
-    flipud=0.0,
-    mosaic=0.0,
-    mixup=0.0,
-    degrees=10.0,
-    translate=0.04,
-    scale=0.08,
-    optimizer="AdamW"
-)
-```
-
-### Test YOLO-pose on video
-
-```bash
-python test_yolo_pose_video_ui.py
-```
-
-This script currently checks pose quality only. It does not yet perform final KEEP/REJECT decisions.
+If it prints `pose`, then the wrong `best.pt` file was loaded.
 
 ---
 
-## 📂 Suggested File Structure
+## 🧪 Interpretation Checklist
 
-```text
-GRIP/
-├── README.md
-├── requirements.txt
-├── data/
-│   ├── raw_videos/
-│   ├── extracted_frames/
-│   ├── pose_annotations/
-│   └── yolo_pose_70_20_10/
-│       ├── images/
-│       ├── labels/
-│       └── data.yaml
-│
-├── scripts/
-│   ├── grip_yolo_pose_dataset_ui.py
-│   ├── 03_create_yolo_pose_split.py
-│   ├── test_yolo_pose_video_ui.py
-│   ├── extract_frames_filter_blur.py
-│   └── rotate_right_glove_data.py
-│
-├── notebooks/
-│   ├── train_yolo_detect.ipynb
-│   ├── train_cnn_classifier.ipynb
-│   └── train_yolo_pose.ipynb
-│
-├── models/
-│   ├── legacy_detect/
-│   ├── legacy_cnn/
-│   └── pose/
-│
-├── reports/
-│   ├── experiment_logs/
-│   ├── confusion_matrices/
-│   └── failure_cases/
-│
-└── hardware/
-    ├── stm32/
-    ├── scara/
-    └── serial_protocol/
-```
+Use this checklist when explaining or evaluating the model:
+
+- [x] The dataset came from factory conveyor frames.
+- [x] The model was trained using YOLO11n transfer learning.
+- [x] The model predicts three classes: left, right, and unclear.
+- [x] `unclear_glove` is treated as a safe/manual outcome, not a failure.
+- [x] Horizontal flipping was disabled because it can corrupt handedness.
+- [x] `best.pt` was saved automatically based on validation performance.
+- [x] `best.onnx` was exported for future deployment testing.
+- [x] Confusion matrices and F1/precision/recall reports were generated.
+- [x] The most important risk is true right gloves being predicted as left gloves.
+- [ ] The current model still needs testing on independent mixed videos.
+- [ ] More balanced real data is needed before production deployment.
+- [ ] Better lighting and reduced motion blur are needed for improved reliability.
+- [ ] Tracking/temporal voting should be added before SCARA integration.
 
 ---
 
-## 🤖 SCARA Integration Plan
+## ✅ What Worked
 
-The robot integration is not active yet. It will be added after the pose decision logic becomes reliable.
-
-### Planned command format
-
-```json
-{
-  "cmd": "pick",
-  "track_id": 42,
-  "decision": "REJECT",
-  "reason": "wrong_hand_geometry",
-  "bbox": [x1, y1, x2, y2],
-  "timestamp": 1720100234.512
-}
-```
-
-### Planned decision output
-
-| Decision | Meaning |
-|---------|---------|
-| `KEEP` | Glove is correct for lane |
-| `REJECT` | Confident wrong glove |
-| `MANUAL` | Uncertain/folded/low-confidence pose |
-| `IGNORE` | False detection or too low confidence |
-
-### Pick timing formula
-
-```text
-pick_delay_seconds = camera_to_scara_distance_mm / conveyor_speed_mm_s
-trigger_pulse = detection_encoder_pulse + distance_pulses + latency_offset
-```
-
-The timestamp-based version will be used for early testing. Encoder-based timing is required for final precision.
+| Area | Result |
+|---|---|
+| Annotation workflow | Custom annotation process worked for quick dataset creation |
+| Dataset split | 70/20/10 split was created successfully |
+| Label conversion | Pose-style labels were converted into detect labels for urgent training |
+| YOLO11n training | Training completed successfully in Google Colab |
+| Best checkpoint | `best.pt` generated |
+| ONNX export | `best.onnx` generated |
+| Evaluation files | Confusion matrices, curves, and CSV reports generated |
+| GitHub documentation | Results package organized under `Vision/GRIP_YOLO_detect_results_package/` |
 
 ---
 
-## 🚀 Future Work
+## ⚠️ Current Limitations
 
-### Immediate next steps
-
-1. Decide final keypoint schema.
-2. Annotate 300–600 pose frames with consistent keypoints.
-3. Collect real right gloves on the right lane.
-4. Retrain YOLO-pose.
-5. Test keypoint stability on unseen videos.
-6. Implement geometry-based `KEEP / REJECT / MANUAL` logic.
-7. Add tracking to avoid duplicate reject commands.
-
-### Medium-term steps
-
-- Add label defect detection.
-- Add label ROI extraction using bbox or keypoints.
-- Add rotary encoder timing.
-- Add STM32H7 UART JSON command receiver.
-- Add SCARA pick queue.
-- Test end-to-end rejection on moving belt.
-
-### Long-term improvements
-
-- Jetson Orin Nano deployment.
-- TensorRT model export.
-- Multi-lane operation.
-- Size classification.
-- OEE/quality dashboard.
-- Automatic failure-case logging.
+| Limitation | Why it matters | Next improvement |
+|---|---|---|
+| Small dataset | 608 images is prototype-scale | Collect more balanced real factory data |
+| Class imbalance | `unclear_glove` dominates dataset | Add more clear left/right samples |
+| Motion blur | Fingers/thumb are less visible | Use stronger lighting and shorter exposure |
+| Pose not reliable yet | Glove keypoints are unstable when gloves are folded/crumpled | Build a cleaner keypoint dataset later |
+| Mixed-video generalization not proven | Current split may not fully represent future factory conditions | Test on separate mixed videos |
+| No tracker yet | Same glove may be detected repeatedly | Add ByteTrack or similar tracking |
+| No robot command queue yet | Vision is not yet connected to SCARA pick logic | Add decision line + timed command queue |
 
 ---
 
-## 📚 References
+## 🔁 Recommended Next Engineering Steps
 
-- Ultralytics YOLO Pose Estimation Documentation
-- Ultralytics YOLO Detection Documentation
-- CVAT Skeleton/Keypoint Annotation Workflow
-- GRIP Project Proposal and Mid-Evaluation Materials
-- Factory video experiments and failure-case logs
+### Immediate
+
+1. Test `best.pt` using the detector tester, not the pose tester.
+2. Record screenshots of false predictions.
+3. Check the number of true right gloves predicted as left.
+4. Add more clear `left_glove` and `right_glove` examples.
+5. Retrain with a cleaner and more balanced dataset.
+
+### Next model iteration
+
+1. Add temporal voting across 5-10 frames per tracked glove.
+2. Decide only when the glove crosses a stable decision line.
+3. Use stricter confidence thresholds for automatic pass/reject.
+4. Send low-confidence cases to `unclear/manual`.
+5. Compare single-frame detection vs temporal voting.
+
+### Future
+
+1. Improve lighting and camera exposure.
+2. Collect real right-glove wrong-lane samples.
+3. Revisit pose/keypoints only after collecting clean keypoint annotations.
+4. Add label defect detection as a separate ROI classifier.
+5. Export and benchmark on Jetson Orin Nano using ONNX/TensorRT.
+6. Integrate with SCARA robot command queue.
 
 ---
 
 <div align="center">
 
-**Group MOSFET · ENTC, University of Moratuwa · 2026**
-
-*GRIP - Glove Rejection and Inspection Process*
+**GRIP - Glove Rejection and Inspection Process**  
+**Vision / YOLO Detect Results Package**  
+**Team MOSFET · ENTC · University of Moratuwa · 2026**
 
 </div>
