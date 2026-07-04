@@ -1,0 +1,54 @@
+{
+    "name": "ODrive Pro v4.2-58V",
+    "mcu": "STM32H7A3",
+    "inverters": [
+        {"drv": {"$ref": "drv8353"}, "max_current": 100.0}
+    ],
+    "aux_inverters": [],
+    "rails": {
+    },
+    "io": {
+        "gpio0": "i",
+        "gpio1": "i",
+        "gpio2": "i",
+        "gpio3": "i",
+        "gpio4": "i",
+        "gpio5": "i",
+        "gpio6": "i",
+        "gpio7": "io",
+        "gpio8": "to",
+        "gpio9": "io",
+        "gpio10": "i",
+        "gpio11": "i",
+        "gpio12": "o",
+        "gpio13": "i",
+        "gpio14": "ip",
+        "gpio15": "op",
+        "gpio16": "io",
+        "gpio17": "io",
+        "gpio18": "io",
+        "gpio19": "io",
+        "gpio20": "io",
+        "gpio21": "io",
+        "gpio22": ""
+    },
+    "inc_enc": [
+        {"a": "gpio0", "b": "gpio5"},
+        {"a": "gpio20", "b": "gpio21"}
+    ],
+    "spi": [
+        {"miso": "gpio17", "mosi": "gpio18", "sck": "gpio19"}
+    ],
+    "uart": [
+        {"rx": "gpio14", "tx": "gpio15"}
+    ],
+    "step_dir": [],
+    "rs485": [],
+    "temp_in": [],
+    "fan": true,
+    "onboard_encoders": 1,
+    "defaults": {
+        "inc_enc_z": ["gpio6", "gpio22"],
+        "spi_ncs": ["gpio16"]
+    }
+}

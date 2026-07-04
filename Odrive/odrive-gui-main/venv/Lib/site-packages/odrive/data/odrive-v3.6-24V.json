@@ -1,0 +1,50 @@
+{
+    "name": "ODrive v3.6-24V",
+    "mcu": "STM32F4x",
+    "inverters": [
+        {"drv": {"$ref": "drv8301"}, "max_current": 80.0},
+        {"drv": {"$ref": "drv8301"}, "max_current": 80.0}
+    ],
+    "aux_inverters": [],
+    "rails": {
+    },
+    "io": {
+        "gpio1": "iop",
+        "gpio2": "iop",
+        "gpio3": "iop",
+        "gpio4": "iop",
+        "gpio5": "io",
+        "gpio6": "io",
+        "gpio7": "io",
+        "gpio8": "io",
+        "enc0_a": "",
+        "enc0_b": "",
+        "enc0_z": "",
+        "enc1_a": "",
+        "enc1_b": "",
+        "enc1_z": "",
+        "spi_miso": "",
+        "spi_mosi": "",
+        "spi_sck": ""
+    },
+    "inc_enc": [
+        {"a": "enc0_a", "b": "enc0_b"},
+        {"a": "enc1_a", "b": "enc1_b"}
+    ],
+    "spi": [
+        {"miso": "spi_miso", "mosi": "spi_mosi", "sck": "spi_sck"}
+    ],
+    "uart": [
+        {"rx": "gpio2", "tx": "gpio1"},
+        {"rx": "gpio4", "tx": "gpio3"}
+    ],
+    "step_dir": [],
+    "rs485": [],
+    "temp_in": [],
+    "fan": false,
+    "onboard_encoders": 0,
+    "defaults": {
+        "inc_enc_z": ["enc0_z", "enc1_z"],
+        "spi_ncs": ["gpio7"]
+    }
+}

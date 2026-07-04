@@ -1,4 +1,4 @@
-../Core/Src/main.c:91:5:main	16	static
+../Core/Src/main.c:91:5:main	8	static
 ../Core/Src/main.c:199:6:SystemClock_Config	120	static
 ../Core/Src/main.c:266:13:MX_FDCAN1_Init	8	static
 ../Core/Src/main.c:319:13:MX_FDCAN2_Init	8	static

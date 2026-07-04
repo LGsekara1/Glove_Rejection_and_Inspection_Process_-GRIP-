@@ -22,7 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "usbd_cdc_if.h"
+//#include "usbd_cdc_if.h"
 #include <stdio.h>
 /* USER CODE END Includes */
 
@@ -151,26 +151,26 @@ int main(void)
 //----GPIO toggle check-------------------
 //
 	  HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_SET);
-	  HAL_Delay(500);
+	  HAL_Delay(50);
 	  HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_RESET);
-	  HAL_Delay(500);
+	  HAL_Delay(50);
 
 	  /* Read time first */
-	      HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
-
-	      /* Then read date (required to unlock the shadow registers) */
-	      HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
-
-	      sprintf(msg,
-	              "%02d:%02d:%02d\r\n",
-	              sTime.Hours,
-	              sTime.Minutes,
-	              sTime.Seconds);
-
-	      CDC_Transmit_FS((uint8_t*)msg,
-	                          strlen(msg));
-
-	      HAL_Delay(1000);
+//	      HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
+//
+//	      /* Then read date (required to unlock the shadow registers) */
+//	      HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
+//
+//	      sprintf(msg,
+//	              "%02d:%02d:%02d\r\n",
+//	              sTime.Hours,
+//	              sTime.Minutes,
+//	              sTime.Seconds);
+//
+////	      CDC_Transmit_FS((uint8_t*)msg,
+////	                          strlen(msg));
+//
+//	      HAL_Delay(1000);
 
 
 //-----HSE check------------------------
