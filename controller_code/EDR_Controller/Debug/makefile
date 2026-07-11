@@ -12,7 +12,7 @@ RM := rm -rf
 -include USB_DEVICE/Target/subdir.mk
 -include USB_DEVICE/App/subdir.mk
 -include Middlewares/ST/STM32_USB_Device_Library/Core/Src/subdir.mk
--include Middlewares/ST/STM32_USB_Device_Library/Class/DFU/Src/subdir.mk
+-include Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/subdir.mk
 -include Drivers/STM32H7xx_HAL_Driver/Src/subdir.mk
 -include Core/Startup/subdir.mk
 -include Core/Src/subdir.mk
@@ -64,8 +64,8 @@ all: main-build
 main-build: STM.elf secondary-outputs
 
 # Tool invocations
-STM.elf STM.map: $(OBJS) $(USER_OBJS) D:\Academics\Semester\ 4\EN2160\Project\Glove_Rejection_and_Inspection_Process_-GRIP-\controller_code\EDR_Controller\STM32H750VBTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "STM.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"D:\Academics\Semester 4\EN2160\Project\Glove_Rejection_and_Inspection_Process_-GRIP-\controller_code\EDR_Controller\STM32H750VBTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="STM.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+STM.elf STM.map: $(OBJS) $(USER_OBJS) C:\Users\USER\Documents\GitHub\Glove_Rejection_and_Inspection_Process_-GRIP-\controller_code\EDR_Controller\STM32H750VBTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "STM.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"C:\Users\USER\Documents\GitHub\Glove_Rejection_and_Inspection_Process_-GRIP-\controller_code\EDR_Controller\STM32H750VBTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="STM.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
