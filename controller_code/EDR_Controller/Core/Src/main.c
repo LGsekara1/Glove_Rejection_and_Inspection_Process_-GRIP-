@@ -22,8 +22,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "odrive_can_commands.h"
+
 #include "usbd_cdc_if.h"
 #include <stdio.h>
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -43,7 +46,6 @@
 
 /* Private variables ---------------------------------------------------------*/
 
-FDCAN_HandleTypeDef hfdcan1;
 FDCAN_HandleTypeDef hfdcan2;
 
 I2C_HandleTypeDef hi2c1;
@@ -59,14 +61,20 @@ UART_HandleTypeDef huart5;
 /* USER CODE BEGIN PV */
 
 
-uint8_t buffer[64];
-char en[] = "w axis0.requested_state 8\n";
-char cmd[] = "r vbus_voltage\n";
+uint8_t buffer[1024];
+char msg[100];
 
-uint8_t uart_rx_buf[1];
+//-------ASCII commands for Odrive with UART---------
+char fullCallib[] = "w axis0.requested_state 3\n";
+char en8[] = "w axis0.requested_state 8\n";
+char saveConfig[] = "ss";
+char trapezoidal[] = "t 0 -2\n";
+char motor_velo[] = "v 0 1 0\n";
+char read_voltage[] = "r vbus_voltage\n";
 
 
-//Variables for FDCAN comm
+uint8_t uart_rx_buf[8];
+uint16_t uart_rx_index = 0;
 
 FDCAN_FilterTypeDef filter;
 
@@ -79,7 +87,11 @@ uint8_t txData[8] =
 };
 
 uint8_t rxData[8];
+uint8_t indx;
 
+
+uint32_t can_id;
+uint8_t axis_id=0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -87,7 +99,6 @@ void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_FDCAN1_Init(void);
 static void MX_FDCAN2_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2C4_Init(void);
@@ -144,7 +155,6 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_FDCAN1_Init();
   MX_FDCAN2_Init();
   MX_I2C1_Init();
   MX_I2C4_Init();
@@ -169,7 +179,7 @@ int main(void)
 
 
 
-  //-------Configuring a mask filter ---------
+//  -------Configuring a mask filter ---------
 //  filter.IdType = FDCAN_STANDARD_ID;
 //  filter.FilterIndex = 0;
 //  filter.FilterType = FDCAN_FILTER_MASK;
@@ -178,10 +188,10 @@ int main(void)
 //  filter.FilterID1 = 0x000;
 //  filter.FilterID2 = 0x000;
 //
-//  HAL_FDCAN_ConfigFilter(&hfdcan1, &filter);
+//
 //  HAL_FDCAN_ConfigFilter(&hfdcan2, &filter);
 //
-//  //---------Configuring the TX header
+////  //---------Configuring the TX header
 //  txHeader.Identifier = 0x123;
 //  txHeader.IdType = FDCAN_STANDARD_ID;
 //  txHeader.TxFrameType = FDCAN_DATA_FRAME;
@@ -191,49 +201,18 @@ int main(void)
 //  txHeader.FDFormat = FDCAN_CLASSIC_CAN;
 //  txHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
 //  txHeader.MessageMarker = 0;
-//
-//  //-------starting the fdcan
-//  HAL_FDCAN_Start(&hfdcan1);
-//  HAL_FDCAN_Start(&hfdcan2);
-//
-//
-//  //--------Coding RX interrupt
-//  HAL_FDCAN_ActivateNotification(
-//          &hfdcan1,
+////
+////------------starting  fdcan2-----------------------------------
+//HAL_FDCAN_Start(&hfdcan2);
+////
+////
+////--------Coding RX interrupt-----------
+//HAL_FDCAN_ActivateNotification(
+//          &hfdcan2,
 //          FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
 //          0);
-//
-//  //---------Callback
-//  void HAL_FDCAN_RxFifo0Callback(
-//          FDCAN_HandleTypeDef *hfdcan,
-//          uint32_t RxFifo0ITs)
-//  {
-//      HAL_FDCAN_GetRxMessage(
-//              hfdcan,
-//              FDCAN_RX_FIFO0,
-//              &rxHeader,
-//              rxData);
-//
-//
-//      // Send "Received!\r\n"
-//	  sprintf((char*)buffer, "Received!\r\n");
-//	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//
-//	  // Send ID
-//	  sprintf((char*)buffer, "ID = %03lx\r\n", rxHeader.Identifier);
-//	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//
-//	  // Send data bytes
-//	  for(int i = 0; i < 8; i++) {
-//	      sprintf((char*)buffer, "%02X ", rxData[i]);
-//	      CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//	  }
-//
-//	  // Send newline
-//	  sprintf((char*)buffer, "\r\n");
-//	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//  }
-//
+
+
 //  //-------Debugging with status checks for CAN init
 //  HAL_StatusTypeDef ret;
 //
@@ -257,9 +236,16 @@ int main(void)
 //	 if(status != HAL_OK){
 //
 //	 }
-  sprintf((char*)buffer,"Starting!");
-  CDC_Transmit_FS(buffer, strlen((char*)buffer));
+//  sprintf((char*)buffer,"Starting!");
+//  CDC_Transmit_FS(buffer, strlen((char*)buffer));
+//
 
+  HAL_UART_Receive_IT(&huart5, uart_rx_buf, 1);
+//
+//  HAL_StatusTypeDef uart_status = HAL_UART_Transmit(&huart5, (uint8_t*)fullCallib, strlen(fullCallib), 1000);
+//  HAL_Delay(10000);
+//  HAL_UART_Transmit(&huart5, (uint8_t*)saveConfig, strlen(saveConfig), 1000);
+//  HAL_Delay(5000);
 
 
   /* USER CODE END 2 */
@@ -271,10 +257,10 @@ int main(void)
 
 //----GPIO toggle check-------------------
 //
-	  HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_SET);
-	  HAL_Delay(1000);
-	  HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_RESET);
-	  HAL_Delay(1000);
+//	  HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_SET);
+//	  HAL_Delay(1000);
+//	  HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_RESET);
+//	  HAL_Delay(1000);
 
 	  /* Read time first */
 //	      HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
@@ -305,81 +291,105 @@ int main(void)
 //
 //	 HAL_Delay(500);
 
+//CDC check
+//	  sprintf((char*)buffer,"CDC up and running!\n");
+//	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
+//	  HAL_Delay(1000);
+
 
 //---------------CAN---------------------------------
 
+//   for (int i=0; i<8; i++)
+//   {
+//	txData[i] = indx++;
+//   }
+//
+//   HAL_StatusTypeDef status;
+//   status = HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &txHeader, txData);
+//   if (status!= HAL_OK)
+//   {
+//	Error_Handler();
+//   }
 
+//-----Clear errors and read bus voltage
+//	  uint8_t txData[8] = {0};
+//	  uint32_t data =0 ;
+//	  memcpy(txData,&data,sizeof(data));
+//	  txHeader.Identifier = ODrive_Get_CAN_ID(0, CMD_CLEAR_ERRORS);
+//	  txHeader.DataLength = FDCAN_DLC_BYTES_0;
+//	  HAL_StatusTypeDef ret = HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &txHeader, txData);
+
+
+//	  HAL_Delay(2000);
+//	  txHeader.Identifier = ODrive_Get_CAN_ID(0, CMD_GET_BUS_VOLTAGE_AND_CURRENT);
+//	  txHeader.TxFrameType = FDCAN_REMOTE_FRAME;
+//	  txHeader.DataLength = FDCAN_DLC_BYTES_8;   // requested length
+//	  HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &txHeader, txData);
+
+//	  FDCAN_ProtocolStatusTypeDef status;
+//	  HAL_FDCAN_GetProtocolStatus(&hfdcan2, &status);
+//	  sprintf((char*)buffer, "LEC:%lu DLEC:%lu EP:%d BO:%d\r\n",
+//	          status.LastErrorCode, status.DataLastErrorCode,
+//	          status.ErrorPassive, status.BusOff);
+//	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
+//	  HAL_Delay(2000);
+
+//--closed loop motor control
+
+//	  uint32_t state = 3;
+//	  memcpy(txData, &state, sizeof(state));
+//	  txHeader.Identifier = ODrive_Get_CAN_ID(0, CMD_SET_AXIS_REQUESTED_STATE);
+//	  txHeader.DataLength = FDCAN_DLC_BYTES_4;
 //	  HAL_FDCAN_AddMessageToTxFifoQ(
-//	          &hfdcan1,
-//	          &txHeader,
-//	          txData);
-//
-//	  HAL_Delay(1000);
-
-
-//------CAN TX between two FDCANs------------------
-//	  HAL_StatusTypeDef ret;
-//
-//	  ret = HAL_FDCAN_AddMessageToTxFifoQ(
-//	          &hfdcan1,
-//	          &txHeader,
-//	          txData);
-//
-//
-//
-//	  HAL_Delay(20);
-//
-//
-//	  if(HAL_FDCAN_GetRxFifoFillLevel(
 //	          &hfdcan2,
-//	          FDCAN_RX_FIFO0))
-//	  {
-//	      ret = HAL_FDCAN_GetRxMessage(
-//	              &hfdcan2,
-//	              FDCAN_RX_FIFO0,
-//	              &rxHeader,
-//	              rxData);
+//	          &txHeader,
+//	          txData
+//	  );
+//	  HAL_Delay(6000);
+
+//	  uint8_t data[8] = {0};
 //
-//	      //printf("Received\r\n");
-//	      sprintf((char*)buffer,"Received\n");
-//	      CDC_Transmit_FS(buffer, strlen((char*)buffer));
+//	  uint32_t state = 8;   // CLOSED_LOOP_CONTROL
 //
+//	  memcpy(data, &state, 4);
 //
-//	      //printf("ID=%03lx\r\n",rxHeader.Identifier);
-//	      sprintf((char*)buffer, "GetRx=%d ID=%031\n", ret,rxHeader.Identifier);
-//	      CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//
-//
-////	      for(int i = 0; i < 8; i++)
-////	      {
-////	          sprintf((char*)buffer,"%02X ",rxData[i]);
-////	          CDC_Transmit_FS(buffer, strlen((char*)buffer));
-////	      }
-//
-//	      sprintf((char*)buffer,"\r\n");
-//	      CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//
-//	      //printf("\r\n");
-//	  }
-//	  else
-//	  {
-//	      //printf("Nothing received\r\n");
-//	      sprintf((char*)buffer,"Nothing received\r\n");
-//	      CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//
-//	  }
-//
-//	  HAL_Delay(1000);
+//	  ODrive_CAN_Send(
+//	      1,                         // axis_id
+//	      CMD_SET_AXIS_NODE_ID,
+//	      data,
+//	      8
+//	  );
+
+
+//   HAL_Delay (1000);
+
+
 //------------------Odrive testing-----------------------------
-	  sprintf((char*)buffer,"CDC up and running !\r\n");
-	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
 
-	  HAL_Delay(500);
-	  HAL_UART_Transmit(&huart5, (uint8_t*)cmd, strlen(cmd), 1000);
+//	  HAL_Delay(500);
+
+//	  // Diagnostic feedback
+//	  if(uart_status == HAL_OK) {
+//		  sprintf((char*)buffer,"UART TX OK\r\n");
+//	  } else if(uart_status == HAL_TIMEOUT) {
+//		  sprintf((char*)buffer,"UART TX TIMEOUT\r\n");
+//	  } else if(uart_status == HAL_BUSY) {
+//		  sprintf((char*)buffer,"UART TX BUSY\r\n");
+//	  } else {
+//		  sprintf((char*)buffer,"UART TX ERROR: %d\r\n", uart_status);
+//	  }
+//	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
+//	  HAL_Delay(500);
 
 
+//
+	  HAL_UART_Transmit(&huart5, (uint8_t*)read_voltage, strlen(read_voltage), 1000);
+	  HAL_Delay(4000);
 
 
+//	  HAL_UART_Transmit(&huart5, (uint8_t*)motor_velo, strlen(motor_velo), 1000);
+//
+//	  HAL_Delay(10000);
 
     /* USER CODE END WHILE */
 
@@ -481,59 +491,6 @@ void PeriphCommonClock_Config(void)
 }
 
 /**
-  * @brief FDCAN1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_FDCAN1_Init(void)
-{
-
-  /* USER CODE BEGIN FDCAN1_Init 0 */
-
-  /* USER CODE END FDCAN1_Init 0 */
-
-  /* USER CODE BEGIN FDCAN1_Init 1 */
-
-  /* USER CODE END FDCAN1_Init 1 */
-  hfdcan1.Instance = FDCAN1;
-  hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
-  hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
-  hfdcan1.Init.AutoRetransmission = ENABLE;
-  hfdcan1.Init.TransmitPause = DISABLE;
-  hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 16;
-  hfdcan1.Init.NominalSyncJumpWidth = 1;
-  hfdcan1.Init.NominalTimeSeg1 = 1;
-  hfdcan1.Init.NominalTimeSeg2 = 1;
-  hfdcan1.Init.DataPrescaler = 1;
-  hfdcan1.Init.DataSyncJumpWidth = 1;
-  hfdcan1.Init.DataTimeSeg1 = 1;
-  hfdcan1.Init.DataTimeSeg2 = 1;
-  hfdcan1.Init.MessageRAMOffset = 0;
-  hfdcan1.Init.StdFiltersNbr = 1;
-  hfdcan1.Init.ExtFiltersNbr = 0;
-  hfdcan1.Init.RxFifo0ElmtsNbr = 8;
-  hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
-  hfdcan1.Init.RxFifo1ElmtsNbr = 0;
-  hfdcan1.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
-  hfdcan1.Init.RxBuffersNbr = 0;
-  hfdcan1.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
-  hfdcan1.Init.TxEventsNbr = 0;
-  hfdcan1.Init.TxBuffersNbr = 8;
-  hfdcan1.Init.TxFifoQueueElmtsNbr = 8;
-  hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
-  hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
-  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN FDCAN1_Init 2 */
-
-  /* USER CODE END FDCAN1_Init 2 */
-
-}
-
-/**
   * @brief FDCAN2 Initialization Function
   * @param None
   * @retval None
@@ -554,18 +511,18 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Init.AutoRetransmission = ENABLE;
   hfdcan2.Init.TransmitPause = DISABLE;
   hfdcan2.Init.ProtocolException = DISABLE;
-  hfdcan2.Init.NominalPrescaler = 16;
-  hfdcan2.Init.NominalSyncJumpWidth = 1;
-  hfdcan2.Init.NominalTimeSeg1 = 1;
-  hfdcan2.Init.NominalTimeSeg2 = 1;
-  hfdcan2.Init.DataPrescaler = 1;
-  hfdcan2.Init.DataSyncJumpWidth = 1;
-  hfdcan2.Init.DataTimeSeg1 = 1;
-  hfdcan2.Init.DataTimeSeg2 = 1;
-  hfdcan2.Init.MessageRAMOffset = 1024;
+  hfdcan2.Init.NominalPrescaler = 1;
+  hfdcan2.Init.NominalSyncJumpWidth = 13;
+  hfdcan2.Init.NominalTimeSeg1 = 86;
+  hfdcan2.Init.NominalTimeSeg2 = 13;
+  hfdcan2.Init.DataPrescaler = 5;
+  hfdcan2.Init.DataSyncJumpWidth = 10;
+  hfdcan2.Init.DataTimeSeg1 = 10;
+  hfdcan2.Init.DataTimeSeg2 = 10;
+  hfdcan2.Init.MessageRAMOffset = 0;
   hfdcan2.Init.StdFiltersNbr = 1;
   hfdcan2.Init.ExtFiltersNbr = 0;
-  hfdcan2.Init.RxFifo0ElmtsNbr = 8;
+  hfdcan2.Init.RxFifo0ElmtsNbr = 1;
   hfdcan2.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
   hfdcan2.Init.RxFifo1ElmtsNbr = 0;
   hfdcan2.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
@@ -573,7 +530,7 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
   hfdcan2.Init.TxEventsNbr = 0;
   hfdcan2.Init.TxBuffersNbr = 0;
-  hfdcan2.Init.TxFifoQueueElmtsNbr = 8;
+  hfdcan2.Init.TxFifoQueueElmtsNbr = 1;
   hfdcan2.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   hfdcan2.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
   if (HAL_FDCAN_Init(&hfdcan2) != HAL_OK)
@@ -867,7 +824,7 @@ static void MX_UART5_Init(void)
   {
     Error_Handler();
   }
-  if (HAL_UARTEx_DisableFifoMode(&huart5) != HAL_OK)
+  if (HAL_UARTEx_EnableFifoMode(&huart5) != HAL_OK)
   {
     Error_Handler();
   }
@@ -905,9 +862,6 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(MCU_ODRIVE_I_O_GPIO_Port, MCU_ODRIVE_I_O_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(MCU_VISION_CAN_I_O_GPIO_Port, MCU_VISION_CAN_I_O_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : PE3 PE4 PE5 PE6
                            PE7 PE8 PE9 PE10
@@ -975,21 +929,16 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(MCU_ODRIVE_I_O_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PD8 PD9 PD10 PD14
-                           PD15 PD3 PD4 PD5
-                           PD6 PD7 */
+                           PD15 PD0 PD1 PD2
+                           PD3 PD4 PD5 PD6
+                           PD7 */
   GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_14
-                          |GPIO_PIN_15|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5
-                          |GPIO_PIN_6|GPIO_PIN_7;
+                          |GPIO_PIN_15|GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2
+                          |GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6
+                          |GPIO_PIN_7;
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : MCU_VISION_CAN_I_O_Pin */
-  GPIO_InitStruct.Pin = MCU_VISION_CAN_I_O_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(MCU_VISION_CAN_I_O_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -997,33 +946,129 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+//  //---------Callback
 //void HAL_FDCAN_RxFifo0Callback(
 //        FDCAN_HandleTypeDef *hfdcan,
 //        uint32_t RxFifo0ITs)
 //{
-//    HAL_FDCAN_GetRxMessage(
-//            hfdcan,
-//            FDCAN_RX_FIFO0,
-//            &RxHeader,
-//            RxData);
 //
-//    sprintf(msg,
-//            "RX CAN%d ID=%03lx DATA=%02X %02X %02X %02X %02X %02X %02X %02X\r\n",
-//            (hfdcan == &hfdcan1) ? 1 : 2,
-//            RxHeader.Identifier,
-//            RxData[0],RxData[1],RxData[2],RxData[3],
-//            RxData[4],RxData[5],RxData[6],RxData[7]);
+//    if(hfdcan->Instance == FDCAN2)
+//    {
 //
-//   CDC_Transmit_FS((uint8_t*)msg, strlen(msg));
+//        FDCAN_RxHeaderTypeDef RxHeader;
+//        uint8_t RxData[8];
+//
+//
+//        HAL_FDCAN_GetRxMessage(
+//                hfdcan,
+//                FDCAN_RX_FIFO0,
+//                &RxHeader,
+//                RxData);
+//
+//
+//
+////        sprintf(msg,
+////        "ODrive RX\r\n"
+////        "ID: %lx DATA: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
+////        RxHeader.Identifier,
+////        RxData[0],
+////        RxData[1],
+////        RxData[2],
+////        RxData[3],
+////        RxData[4],
+////        RxData[5],
+////        RxData[6],
+////        RxData[7]);
+//       float voltage;
+//	   float current;
+//
+//	   memcpy(&voltage, &RxData[0], 4);
+//	   memcpy(&current, &RxData[4], 4);
+//
+//	   sprintf(msg,
+//			   "Voltage = %.2f V\r\n"
+//			   "Current = %.2f A\r\n",
+//			   voltage,
+//			   current);
+//
+//
+//
+//        CDC_Transmit_FS(
+//                (uint8_t*)msg,
+//                strlen(msg));
+//
+//
+//    }
 //}
+//
 
+//void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+//{
+//    if (huart->Instance == UART5) {
+//
+//        uint8_t rx_byte = huart->pRxBuffPtr[0];
+//
+//        if (uart_rx_index < (sizeof(uart_rx_buf) - 1)) {
+//            uart_rx_buf[uart_rx_index++] = rx_byte;
+//
+//            if (rx_byte == '\n' || rx_byte == '\r') {
+//                uart_rx_buf[uart_rx_index] = '\0';
+//                CDC_Transmit_FS((uint8_t*)"Loopback RX:\n ", strlen("Loopback RX: "));
+//                CDC_Transmit_FS(uart_rx_buf, uart_rx_index);
+//                uart_rx_index = 0;
+//            } else {
+//                CDC_Transmit_FS(&rx_byte, 1);
+//            }
+//        } else {
+//            uart_rx_index = 0;
+//        }
+//
+//        HAL_UART_Receive_IT(&huart5, &uart_rx_buf[uart_rx_index], 1);
+//    }
+//}
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == UART5) {
-        CDC_Transmit_FS(uart_rx_buf, 1);   // send received byte to USB VCP
-        HAL_UART_Receive_IT(&huart5, uart_rx_buf, 1);  // restart receive
+        // Byte is already in uart_rx_buf[uart_rx_index] (HAL wrote it there)
+        uart_rx_index++;
+
+        if (uart_rx_index >= sizeof(uart_rx_buf)) {
+            CDC_Transmit_FS(uart_rx_buf, uart_rx_index);
+            uart_rx_index = 0;
+        }
+
+        // Re-arm for the NEXT byte, every single time
+        HAL_UART_Receive_IT(&huart5, &uart_rx_buf[uart_rx_index], 1);
     }
 }
+
+
+uint32_t ODrive_Get_CAN_ID(uint8_t axis_id, uint32_t cmd_id)
+{
+    return ((uint32_t)axis_id << 5) | cmd_id;
+}
+//
+//void ODrive_CAN_Send(uint8_t axis_id, uint8_t cmd_id, uint8_t *data, uint8_t length)
+//{
+//    FDCAN_TxHeaderTypeDef TxHeader;
+//
+//    TxHeader.Identifier = ODrive_Get_CAN_ID(axis_id, cmd_id);
+//
+//    TxHeader.IdType = FDCAN_STANDARD_ID;
+//    TxHeader.TxFrameType = FDCAN_DATA_FRAME;
+//    TxHeader.DataLength = length << 16;   // or use FDCAN_DLC_BYTES_x
+//    TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+//    TxHeader.BitRateSwitch = FDCAN_BRS_OFF;
+//    TxHeader.FDFormat = FDCAN_CLASSIC_CAN;
+//    TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+//    TxHeader.MessageMarker = 0;
+//
+//    HAL_FDCAN_AddMessageToTxFifoQ(
+//        &hfdcan2,
+//        &TxHeader,
+//        data
+//    );
+//}
 
 
 
