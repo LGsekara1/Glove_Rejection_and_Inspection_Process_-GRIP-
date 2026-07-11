@@ -1,0 +1,5 @@
+nicegui>=1.4
+numpy
+scipy
+plotly
+odrive==0.5.4
