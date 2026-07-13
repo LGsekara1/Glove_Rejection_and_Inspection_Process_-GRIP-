@@ -103,12 +103,6 @@ void Error_Handler(void);
 #define MCU_CLK_GPIO_Port GPIOA
 #define TX_optional_Pin GPIO_PIN_12
 #define TX_optional_GPIO_Port GPIOC
-#define MCU_VISION_CAN_RX_Pin GPIO_PIN_0
-#define MCU_VISION_CAN_RX_GPIO_Port GPIOD
-#define MCU_VISION_CAN_TX_Pin GPIO_PIN_1
-#define MCU_VISION_CAN_TX_GPIO_Port GPIOD
-#define MCU_VISION_CAN_I_O_Pin GPIO_PIN_2
-#define MCU_VISION_CAN_I_O_GPIO_Port GPIOD
 #define RX_optional_Pin GPIO_PIN_5
 #define RX_optional_GPIO_Port GPIOB
 #define HOMER_B_SCL_1_Pin GPIO_PIN_6
