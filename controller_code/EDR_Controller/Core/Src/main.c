@@ -23,6 +23,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "odrive_can_commands.h"
+#include "scara_app.h"
+
 
 #include "usbd_cdc_if.h"
 #include <stdio.h>
@@ -46,11 +48,6 @@
 
 /* Private variables ---------------------------------------------------------*/
 
-FDCAN_HandleTypeDef hfdcan2;
-
-I2C_HandleTypeDef hi2c1;
-I2C_HandleTypeDef hi2c4;
-
 QSPI_HandleTypeDef hqspi;
 
 RTC_HandleTypeDef hrtc;
@@ -73,25 +70,38 @@ char motor_velo[] = "v 0 1 0\n";
 char read_voltage[] = "r vbus_voltage\n";
 
 
-uint8_t uart_rx_buf[8];
-uint16_t uart_rx_index = 0;
-
-FDCAN_FilterTypeDef filter;
-
-FDCAN_TxHeaderTypeDef txHeader;
-FDCAN_RxHeaderTypeDef rxHeader;
-
-uint8_t txData[8] =
-{
-    1,2,3,4,5,6,7,8
-};
-
-uint8_t rxData[8];
-uint8_t indx;
+uint8_t uart4_rx_buf[8];
+uint8_t uart5_rx_buf[8];
 
 
-uint32_t can_id;
-uint8_t axis_id=0;
+uint16_t uart4_rx_index = 0;
+uint16_t uart5_rx_index = 0;
+
+
+
+//FDCAN_FilterTypeDef filter;
+//FDCAN_TxHeaderTypeDef txHeader;
+//FDCAN_RxHeaderTypeDef rxHeader;
+//uint32_t can_id;
+//uint8_t axis_id=0;
+
+//uint8_t txData[8] =
+//{
+//    1,2,3,4,5,6,7,8
+//};
+//
+//uint8_t rxData[8];
+//uint8_t indx;
+//DISPLAY CHECKING
+static const uint8_t NX_TERM[3] = {0xFF, 0xFF, 0xFF};
+/* One-byte-at-a-time RX state machine for Nextion touch events.
+ * Packet format: 0x65 <page_id> <component_id> <event> 0xFF 0xFF 0xFF
+ * event: 0x01 = press, 0x00 = release. We act on release. */
+static uint8_t nx_rx_byte;            // scratch byte HAL writes into
+static uint8_t nx_pkt[7];             // assembled packet
+static uint8_t nx_pkt_idx = 0;
+
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -99,9 +109,6 @@ void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_FDCAN2_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_I2C4_Init(void);
 static void MX_QUADSPI_Init(void);
 static void MX_RTC_Init(void);
 static void MX_UART5_Init(void);
@@ -112,7 +119,12 @@ static void MX_UART4_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+//--------for display--------------------
+static void nx_send(UART_HandleTypeDef *huart, const char *cmd)
+{
+    HAL_UART_Transmit(huart, (uint8_t *)cmd, strlen(cmd), 100);
+    HAL_UART_Transmit(huart, (uint8_t *)NX_TERM, 3, 100);
+}
 /* USER CODE END 0 */
 
 /**
@@ -135,6 +147,9 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+
+//Adding scara GUI
+  scara_app_init();
 //  HAL_PWR_EnableBkUpAccess();
 //
 //  if (__HAL_RCC_GET_RTC_SOURCE() != RCC_RTCCLKSOURCE_LSE) {
@@ -155,15 +170,14 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_FDCAN2_Init();
-  MX_I2C1_Init();
-  MX_I2C4_Init();
   MX_QUADSPI_Init();
   MX_RTC_Init();
   MX_UART5_Init();
   MX_UART4_Init();
   MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
+//Alterntative for interrup **Not checked with hardware
+//  odrive_uart_init(&odrv, &huart5);
 
 
 //  rcc_cr_snapshot = RCC->CR;
@@ -179,28 +193,6 @@ int main(void)
 
 
 
-//  -------Configuring a mask filter ---------
-//  filter.IdType = FDCAN_STANDARD_ID;
-//  filter.FilterIndex = 0;
-//  filter.FilterType = FDCAN_FILTER_MASK;
-//  filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-//
-//  filter.FilterID1 = 0x000;
-//  filter.FilterID2 = 0x000;
-//
-//
-//  HAL_FDCAN_ConfigFilter(&hfdcan2, &filter);
-//
-////  //---------Configuring the TX header
-//  txHeader.Identifier = 0x123;
-//  txHeader.IdType = FDCAN_STANDARD_ID;
-//  txHeader.TxFrameType = FDCAN_DATA_FRAME;
-//  txHeader.DataLength = FDCAN_DLC_BYTES_8;
-//  txHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-//  txHeader.BitRateSwitch = FDCAN_BRS_OFF;
-//  txHeader.FDFormat = FDCAN_CLASSIC_CAN;
-//  txHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-//  txHeader.MessageMarker = 0;
 ////
 ////------------starting  fdcan2-----------------------------------
 //HAL_FDCAN_Start(&hfdcan2);
@@ -240,13 +232,17 @@ int main(void)
 //  CDC_Transmit_FS(buffer, strlen((char*)buffer));
 //
 
-  HAL_UART_Receive_IT(&huart5, uart_rx_buf, 1);
-//
+//  HAL_UART_Receive_IT(&huart5, uart_rx_buf, 1);
+//  HAL_UART_Receive_IT(&huart4,uart_rx_buf,1);
+////
 //  HAL_StatusTypeDef uart_status = HAL_UART_Transmit(&huart5, (uint8_t*)fullCallib, strlen(fullCallib), 1000);
 //  HAL_Delay(10000);
 //  HAL_UART_Transmit(&huart5, (uint8_t*)saveConfig, strlen(saveConfig), 1000);
 //  HAL_Delay(5000);
-
+  // Confirm the link is alive at all: force page 0
+  	  HAL_UART_Receive_IT(&huart4, &nx_rx_byte, 1); /* arm first byte */
+      nx_send(&huart4, "page 0");
+//      HAL_Delay(100);
 
   /* USER CODE END 2 */
 
@@ -383,13 +379,34 @@ int main(void)
 
 
 //
-	  HAL_UART_Transmit(&huart5, (uint8_t*)read_voltage, strlen(read_voltage), 1000);
-	  HAL_Delay(4000);
+//	  HAL_UART_Transmit(&huart5, (uint8_t*)read_voltage, strlen(read_voltage), 1000);
+//	  HAL_Delay(4000);
+//
+//
+//
+//	  float vbus;
+//	  if (odrive_read_property_f(&odrv, "vbus_voltage", &vbus) == HAL_OK) {
+//	      sprintf((char*)buffer, "ODrive vbus = %.2f V\r\n", vbus);
+//	  } else {
+//	      sprintf((char*)buffer, "ODrive UART read failed (check wiring/baud)\r\n");
+//	  }
+//	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
 
 
 //	  HAL_UART_Transmit(&huart5, (uint8_t*)motor_velo, strlen(motor_velo), 1000);
 //
 //	  HAL_Delay(10000);
+
+	  //non-blocking, call every loop iteration
+//	  scara_app_poll();
+
+
+
+//-----------Display test
+//	  nx_send(&huart4, "t0.txt=\"GPIO HIGH\"");
+//	         HAL_Delay(500);
+//	         nx_send(&huart4, "t0.txt=\"GPIO LOW\"");
+//	         HAL_Delay(500);
 
     /* USER CODE END WHILE */
 
@@ -421,13 +438,11 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_CSI
-                              |RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_LSI
+                              |RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
-  RCC_OscInitStruct.CSIState = RCC_CSI_ON;
-  RCC_OscInitStruct.CSICalibrationValue = RCC_CSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 2;
@@ -472,8 +487,7 @@ void PeriphCommonClock_Config(void)
 
   /** Initializes the peripherals clock
   */
-  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_UART5|RCC_PERIPHCLK_FDCAN
-                              |RCC_PERIPHCLK_UART4;
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_UART5|RCC_PERIPHCLK_UART4;
   PeriphClkInitStruct.PLL2.PLL2M = 2;
   PeriphClkInitStruct.PLL2.PLL2N = 12;
   PeriphClkInitStruct.PLL2.PLL2P = 2;
@@ -482,161 +496,11 @@ void PeriphCommonClock_Config(void)
   PeriphClkInitStruct.PLL2.PLL2RGE = RCC_PLL2VCIRANGE_3;
   PeriphClkInitStruct.PLL2.PLL2VCOSEL = RCC_PLL2VCOMEDIUM;
   PeriphClkInitStruct.PLL2.PLL2FRACN = 0;
-  PeriphClkInitStruct.FdcanClockSelection = RCC_FDCANCLKSOURCE_PLL2;
   PeriphClkInitStruct.Usart234578ClockSelection = RCC_USART234578CLKSOURCE_PLL2;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
-}
-
-/**
-  * @brief FDCAN2 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_FDCAN2_Init(void)
-{
-
-  /* USER CODE BEGIN FDCAN2_Init 0 */
-
-  /* USER CODE END FDCAN2_Init 0 */
-
-  /* USER CODE BEGIN FDCAN2_Init 1 */
-
-  /* USER CODE END FDCAN2_Init 1 */
-  hfdcan2.Instance = FDCAN2;
-  hfdcan2.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
-  hfdcan2.Init.Mode = FDCAN_MODE_NORMAL;
-  hfdcan2.Init.AutoRetransmission = ENABLE;
-  hfdcan2.Init.TransmitPause = DISABLE;
-  hfdcan2.Init.ProtocolException = DISABLE;
-  hfdcan2.Init.NominalPrescaler = 1;
-  hfdcan2.Init.NominalSyncJumpWidth = 13;
-  hfdcan2.Init.NominalTimeSeg1 = 86;
-  hfdcan2.Init.NominalTimeSeg2 = 13;
-  hfdcan2.Init.DataPrescaler = 5;
-  hfdcan2.Init.DataSyncJumpWidth = 10;
-  hfdcan2.Init.DataTimeSeg1 = 10;
-  hfdcan2.Init.DataTimeSeg2 = 10;
-  hfdcan2.Init.MessageRAMOffset = 0;
-  hfdcan2.Init.StdFiltersNbr = 1;
-  hfdcan2.Init.ExtFiltersNbr = 0;
-  hfdcan2.Init.RxFifo0ElmtsNbr = 1;
-  hfdcan2.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
-  hfdcan2.Init.RxFifo1ElmtsNbr = 0;
-  hfdcan2.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
-  hfdcan2.Init.RxBuffersNbr = 0;
-  hfdcan2.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
-  hfdcan2.Init.TxEventsNbr = 0;
-  hfdcan2.Init.TxBuffersNbr = 0;
-  hfdcan2.Init.TxFifoQueueElmtsNbr = 1;
-  hfdcan2.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
-  hfdcan2.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
-  if (HAL_FDCAN_Init(&hfdcan2) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN FDCAN2_Init 2 */
-
-  /* USER CODE END FDCAN2_Init 2 */
-
-}
-
-/**
-  * @brief I2C1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_I2C1_Init(void)
-{
-
-  /* USER CODE BEGIN I2C1_Init 0 */
-
-  /* USER CODE END I2C1_Init 0 */
-
-  /* USER CODE BEGIN I2C1_Init 1 */
-
-  /* USER CODE END I2C1_Init 1 */
-  hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x00000E14;
-  hi2c1.Init.OwnAddress1 = 0;
-  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c1.Init.OwnAddress2 = 0;
-  hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
-  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Analogue filter
-  */
-  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Digital filter
-  */
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN I2C1_Init 2 */
-
-  /* USER CODE END I2C1_Init 2 */
-
-}
-
-/**
-  * @brief I2C4 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_I2C4_Init(void)
-{
-
-  /* USER CODE BEGIN I2C4_Init 0 */
-
-  /* USER CODE END I2C4_Init 0 */
-
-  /* USER CODE BEGIN I2C4_Init 1 */
-
-  /* USER CODE END I2C4_Init 1 */
-  hi2c4.Instance = I2C4;
-  hi2c4.Init.Timing = 0x00000E14;
-  hi2c4.Init.OwnAddress1 = 0;
-  hi2c4.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
-  hi2c4.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
-  hi2c4.Init.OwnAddress2 = 0;
-  hi2c4.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
-  hi2c4.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
-  hi2c4.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
-  if (HAL_I2C_Init(&hi2c4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Analogue filter
-  */
-  if (HAL_I2CEx_ConfigAnalogFilter(&hi2c4, I2C_ANALOGFILTER_ENABLE) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configure Digital filter
-  */
-  if (HAL_I2CEx_ConfigDigitalFilter(&hi2c4, 0) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN I2C4_Init 2 */
-
-  /* USER CODE END I2C4_Init 2 */
-
 }
 
 /**
@@ -754,7 +618,7 @@ static void MX_UART4_Init(void)
 
   /* USER CODE END UART4_Init 1 */
   huart4.Instance = UART4;
-  huart4.Init.BaudRate = 115200;
+  huart4.Init.BaudRate = 9600;
   huart4.Init.WordLength = UART_WORDLENGTH_8B;
   huart4.Init.StopBits = UART_STOPBITS_1;
   huart4.Init.Parity = UART_PARITY_NONE;
@@ -855,22 +719,29 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, MCU_Pneu_3_Pin|MCU_Pneu_5_1_Pin|MCU_Pneu_5_2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(MCU_ODRIVE_I_O_GPIO_Port, MCU_ODRIVE_I_O_Pin, GPIO_PIN_RESET);
+  /*Configure GPIO pin : PE3 */
+  GPIO_InitStruct.Pin = GPIO_PIN_3;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PE3 PE4 PE5 PE6
-                           PE7 PE8 PE9 PE10
-                           PE11 PE12 PE13 PE14
-                           PE15 PE0 PE1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6
-                          |GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10
-                          |GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14
-                          |GPIO_PIN_15|GPIO_PIN_0|GPIO_PIN_1;
+  /*Configure GPIO pins : PE4 PE5 PE6 PE7
+                           PE8 PE9 PE10 PE11
+                           PE12 PE13 PE14 PE15
+                           PE0 PE1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7
+                          |GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11
+                          |GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15
+                          |GPIO_PIN_0|GPIO_PIN_1;
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
@@ -913,20 +784,17 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LED_PIN_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB0 PB1 PB11 PB15
-                           PB3 PB4 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_11|GPIO_PIN_15
-                          |GPIO_PIN_3|GPIO_PIN_4;
+  /*Configure GPIO pins : PB0 PB1 PB11 PB12
+                           PB13 PB14 PB15 PB3
+                           PB4 PB6 PB7 PB8
+                           PB9 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_11|GPIO_PIN_12
+                          |GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15|GPIO_PIN_3
+                          |GPIO_PIN_4|GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_8
+                          |GPIO_PIN_9;
   GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : MCU_ODRIVE_I_O_Pin */
-  GPIO_InitStruct.Pin = MCU_ODRIVE_I_O_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(MCU_ODRIVE_I_O_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PD8 PD9 PD10 PD14
                            PD15 PD0 PD1 PD2
@@ -946,100 +814,68 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-//  //---------Callback
-//void HAL_FDCAN_RxFifo0Callback(
-//        FDCAN_HandleTypeDef *hfdcan,
-//        uint32_t RxFifo0ITs)
-//{
-//
-//    if(hfdcan->Instance == FDCAN2)
-//    {
-//
-//        FDCAN_RxHeaderTypeDef RxHeader;
-//        uint8_t RxData[8];
-//
-//
-//        HAL_FDCAN_GetRxMessage(
-//                hfdcan,
-//                FDCAN_RX_FIFO0,
-//                &RxHeader,
-//                RxData);
-//
-//
-//
-////        sprintf(msg,
-////        "ODrive RX\r\n"
-////        "ID: %lx DATA: %02X %02X %02X %02X %02X %02X %02X %02X\r\n",
-////        RxHeader.Identifier,
-////        RxData[0],
-////        RxData[1],
-////        RxData[2],
-////        RxData[3],
-////        RxData[4],
-////        RxData[5],
-////        RxData[6],
-////        RxData[7]);
-//       float voltage;
-//	   float current;
-//
-//	   memcpy(&voltage, &RxData[0], 4);
-//	   memcpy(&current, &RxData[4], 4);
-//
-//	   sprintf(msg,
-//			   "Voltage = %.2f V\r\n"
-//			   "Current = %.2f A\r\n",
-//			   voltage,
-//			   current);
-//
-//
-//
-//        CDC_Transmit_FS(
-//                (uint8_t*)msg,
-//                strlen(msg));
-//
-//
-//    }
-//}
-//
 
-//void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-//{
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+//---------------------Interrupt callbak v1--------------------------------
+
 //    if (huart->Instance == UART5) {
+//        // Byte is already in uart_rx_buf[uart_rx_index] (HAL wrote it there)
+//        uart_rx_index++;
 //
-//        uint8_t rx_byte = huart->pRxBuffPtr[0];
-//
-//        if (uart_rx_index < (sizeof(uart_rx_buf) - 1)) {
-//            uart_rx_buf[uart_rx_index++] = rx_byte;
-//
-//            if (rx_byte == '\n' || rx_byte == '\r') {
-//                uart_rx_buf[uart_rx_index] = '\0';
-//                CDC_Transmit_FS((uint8_t*)"Loopback RX:\n ", strlen("Loopback RX: "));
-//                CDC_Transmit_FS(uart_rx_buf, uart_rx_index);
-//                uart_rx_index = 0;
-//            } else {
-//                CDC_Transmit_FS(&rx_byte, 1);
-//            }
-//        } else {
+//        if (uart_rx_index >= sizeof(uart_rx_buf)) {
+//            CDC_Transmit_FS(uart_rx_buf, uart_rx_index);
 //            uart_rx_index = 0;
 //        }
 //
+//        // Re-arm for the NEXT byte, every single time
 //        HAL_UART_Receive_IT(&huart5, &uart_rx_buf[uart_rx_index], 1);
 //    }
-//}
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == UART5) {
-        // Byte is already in uart_rx_buf[uart_rx_index] (HAL wrote it there)
-        uart_rx_index++;
 
-        if (uart_rx_index >= sizeof(uart_rx_buf)) {
-            CDC_Transmit_FS(uart_rx_buf, uart_rx_index);
-            uart_rx_index = 0;
-        }
+//------------------Interrupt callback v2-----------------------
+//	if(huart->Instance == ODRIVE_UART_HANDLE.Instance){
+//		odrive_uart_rx_byte_isr(&g_odrive_ctx, g_odrive_ctx.rx_isr_byte);
+//		HAL_UART_Receive_IT(huart,&g_odrive_ctx.rx_isr_byte,1);
+//	}else if(huart->Instance == DISPLAY_UART_HANDLE.Instance){
+//		odrive_uart_rx_byte_isr(&g_nextion_ctx, g_nextion_ctx.rx_isr_byte);
+//		HAL_UART_Receive_IT(huart,&g_nextion_ctx.rx_isr_byte,1);
+//	}
 
-        // Re-arm for the NEXT byte, every single time
-        HAL_UART_Receive_IT(&huart5, &uart_rx_buf[uart_rx_index], 1);
-    }
+//---------------------Interrupt callback v3 for display testing
+	void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+	{
+	    if (huart->Instance == UART4) /* <- your Nextion UART instance */
+	    {
+	        uint8_t b = nx_rx_byte;
+
+	        if (nx_pkt_idx == 0 && b != 0x65) {
+	            /* not the start of a touch packet - ignore stray byte and
+	             * keep waiting for 0x65 */
+	        } else {
+	            nx_pkt[nx_pkt_idx++] = b;
+
+	            if (nx_pkt_idx == 7) {
+	                /* full packet assembled: validate the 0xFF 0xFF 0xFF tail */
+	                if (nx_pkt[4] == 0xFF && nx_pkt[5] == 0xFF && nx_pkt[6] == 0xFF) {
+	                    uint8_t component_id = nx_pkt[2];
+	                    uint8_t event = nx_pkt[3];
+
+	                    if (event == 0x00) { /* release only */
+	                        if (component_id == 0) {        /* b0 = LED ON */
+	                            HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_SET);
+	                        } else if (component_id == 1) { /* b1 = LED OFF */
+	                            HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_RESET);
+	                        }
+	                    }
+	                }
+	                nx_pkt_idx = 0; /* ready for next packet */
+	            }
+	        }
+
+	        HAL_UART_Receive_IT(huart, &nx_rx_byte, 1); /* re-arm, always */
+	    }
+	}
+
 }
 
 
@@ -1047,29 +883,6 @@ uint32_t ODrive_Get_CAN_ID(uint8_t axis_id, uint32_t cmd_id)
 {
     return ((uint32_t)axis_id << 5) | cmd_id;
 }
-//
-//void ODrive_CAN_Send(uint8_t axis_id, uint8_t cmd_id, uint8_t *data, uint8_t length)
-//{
-//    FDCAN_TxHeaderTypeDef TxHeader;
-//
-//    TxHeader.Identifier = ODrive_Get_CAN_ID(axis_id, cmd_id);
-//
-//    TxHeader.IdType = FDCAN_STANDARD_ID;
-//    TxHeader.TxFrameType = FDCAN_DATA_FRAME;
-//    TxHeader.DataLength = length << 16;   // or use FDCAN_DLC_BYTES_x
-//    TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-//    TxHeader.BitRateSwitch = FDCAN_BRS_OFF;
-//    TxHeader.FDFormat = FDCAN_CLASSIC_CAN;
-//    TxHeader.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-//    TxHeader.MessageMarker = 0;
-//
-//    HAL_FDCAN_AddMessageToTxFifoQ(
-//        &hfdcan2,
-//        &TxHeader,
-//        data
-//    );
-//}
-
 
 
 

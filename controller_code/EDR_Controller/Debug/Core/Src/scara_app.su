@@ -1,0 +1,8 @@
+../Core/Src/scara_app.c:58:13:log_line	16	static
+../Core/Src/scara_app.c:63:13:set_status_text	16	static
+../Core/Src/scara_app.c:72:13:start_homing_axis	64	static
+../Core/Src/scara_app.c:89:13:poll_homing_axis	88	static
+../Core/Src/scara_app.c:122:13:handle_touch_event	16	static
+../Core/Src/scara_app.c:193:13:refresh_status_screen	56	static
+../Core/Src/scara_app.c:233:6:scara_app_init	8	static
+../Core/Src/scara_app.c:252:6:scara_app_poll	16	static

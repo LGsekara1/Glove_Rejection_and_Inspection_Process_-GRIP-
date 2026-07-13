@@ -59,6 +59,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define FLASH_IO2_Pin GPIO_PIN_2
 #define FLASH_IO2_GPIO_Port GPIOE
+#define LED_PIN_Pin GPIO_PIN_4
+#define LED_PIN_GPIO_Port GPIOC
 #define MCU_HSE_IN_Pin GPIO_PIN_0
 #define MCU_HSE_IN_GPIO_Port GPIOH
 #define MCU_HSE_OUT_Pin GPIO_PIN_1
@@ -75,18 +77,10 @@ void Error_Handler(void);
 #define MCU_Pneu_5_2_GPIO_Port GPIOA
 #define BUCK_PG_Pin GPIO_PIN_7
 #define BUCK_PG_GPIO_Port GPIOA
-#define LED_PIN_Pin GPIO_PIN_4
-#define LED_PIN_GPIO_Port GPIOC
 #define FLASH_CLK_Pin GPIO_PIN_2
 #define FLASH_CLK_GPIO_Port GPIOB
 #define FLASH_NCS_Pin GPIO_PIN_10
 #define FLASH_NCS_GPIO_Port GPIOB
-#define MCU_ODRIVE_CAN_RX_Pin GPIO_PIN_12
-#define MCU_ODRIVE_CAN_RX_GPIO_Port GPIOB
-#define MCU_ODRIVE_CAN_TX_Pin GPIO_PIN_13
-#define MCU_ODRIVE_CAN_TX_GPIO_Port GPIOB
-#define MCU_ODRIVE_I_O_Pin GPIO_PIN_14
-#define MCU_ODRIVE_I_O_GPIO_Port GPIOB
 #define FLASH_MOSI_IO0_Pin GPIO_PIN_11
 #define FLASH_MOSI_IO0_GPIO_Port GPIOD
 #define FLASH_MISO_IO1_Pin GPIO_PIN_12
@@ -101,18 +95,10 @@ void Error_Handler(void);
 #define MCU__SWDIO_GPIO_Port GPIOA
 #define MCU_CLK_Pin GPIO_PIN_14
 #define MCU_CLK_GPIO_Port GPIOA
-#define TX_optional_Pin GPIO_PIN_12
-#define TX_optional_GPIO_Port GPIOC
-#define RX_optional_Pin GPIO_PIN_5
-#define RX_optional_GPIO_Port GPIOB
-#define HOMER_B_SCL_1_Pin GPIO_PIN_6
-#define HOMER_B_SCL_1_GPIO_Port GPIOB
-#define HOMER_A_SDA_2_Pin GPIO_PIN_7
-#define HOMER_A_SDA_2_GPIO_Port GPIOB
-#define HOMER_B_SCL_2_Pin GPIO_PIN_8
-#define HOMER_B_SCL_2_GPIO_Port GPIOB
-#define HOMER_B_SDA_1_Pin GPIO_PIN_9
-#define HOMER_B_SDA_1_GPIO_Port GPIOB
+#define MCU_ODRIVE_TX_Pin GPIO_PIN_12
+#define MCU_ODRIVE_TX_GPIO_Port GPIOC
+#define MCU_ODRIVE_RX_Pin GPIO_PIN_5
+#define MCU_ODRIVE_RX_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

@@ -1,11 +1,7 @@
 ../Core/Src/stm32h7xx_hal_msp.c:62:6:HAL_MspInit	16	static
-../Core/Src/stm32h7xx_hal_msp.c:84:6:HAL_FDCAN_MspInit	48	static
-../Core/Src/stm32h7xx_hal_msp.c:128:6:HAL_FDCAN_MspDeInit	16	static
-../Core/Src/stm32h7xx_hal_msp.c:161:6:HAL_I2C_MspInit	248	static
-../Core/Src/stm32h7xx_hal_msp.c:240:6:HAL_I2C_MspDeInit	16	static
-../Core/Src/stm32h7xx_hal_msp.c:291:6:HAL_QSPI_MspInit	248	static
-../Core/Src/stm32h7xx_hal_msp.c:359:6:HAL_QSPI_MspDeInit	16	static
-../Core/Src/stm32h7xx_hal_msp.c:396:6:HAL_RTC_MspInit	208	static
-../Core/Src/stm32h7xx_hal_msp.c:430:6:HAL_RTC_MspDeInit	16	static
-../Core/Src/stm32h7xx_hal_msp.c:452:6:HAL_UART_MspInit	56	static
-../Core/Src/stm32h7xx_hal_msp.c:523:6:HAL_UART_MspDeInit	16	static
+../Core/Src/stm32h7xx_hal_msp.c:84:6:HAL_QSPI_MspInit	248	static
+../Core/Src/stm32h7xx_hal_msp.c:152:6:HAL_QSPI_MspDeInit	16	static
+../Core/Src/stm32h7xx_hal_msp.c:189:6:HAL_RTC_MspInit	208	static
+../Core/Src/stm32h7xx_hal_msp.c:223:6:HAL_RTC_MspDeInit	16	static
+../Core/Src/stm32h7xx_hal_msp.c:245:6:HAL_UART_MspInit	56	static
+../Core/Src/stm32h7xx_hal_msp.c:316:6:HAL_UART_MspDeInit	16	static

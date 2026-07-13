@@ -98,6 +98,7 @@ DASHBOARD_CONFIG_FILENAME = "five_bar_dashboard_config.json"
 # ---------------------------------------------------------------------------
 # Kinematics helpers (pure functions, no hardware access)
 # ---------------------------------------------------------------------------
+
 def solve_arm_angle(anchor, target, l1, l2, elbow="up"):
     """
     Solve the base joint angle (radians) for one arm of a 2-link chain.

@@ -1,0 +1,13 @@
+../Core/Src/nextion_uart.c:21:13:ring_push	24	static
+../Core/Src/nextion_uart.c:31:13:ring_peek_at	32	static
+../Core/Src/nextion_uart.c:42:13:ring_drop	24	static
+../Core/Src/nextion_uart.c:50:6:nextion_uart_init	16	static
+../Core/Src/nextion_uart.c:56:6:nextion_uart_rx_byte_isr	16	static
+../Core/Src/nextion_uart.c:61:13:push_event	24	static
+../Core/Src/nextion_uart.c:73:6:nextion_uart_poll	24	static
+../Core/Src/nextion_uart.c:109:6:nextion_uart_pop_event	16	static
+../Core/Src/nextion_uart.c:119:13:send_terminated	24	static
+../Core/Src/nextion_uart.c:128:6:nextion_set_text	200	static
+../Core/Src/nextion_uart.c:141:6:nextion_set_text_fmt	120	static
+../Core/Src/nextion_uart.c:154:6:nextion_set_attr	136	static
+../Core/Src/nextion_uart.c:164:6:nextion_goto_page	40	static

@@ -1,0 +1,15 @@
+../Core/Src/odrive_uart.c:24:13:ring_push	2
+../Core/Src/odrive_uart.c:35:13:ring_pop	2
+../Core/Src/odrive_uart.c:45:6:odrive_uart_init	1
+../Core/Src/odrive_uart.c:51:6:odrive_uart_rx_byte_isr	1
+../Core/Src/odrive_uart.c:57:13:send_cmd	1
+../Core/Src/odrive_uart.c:66:13:read_line	7
+../Core/Src/odrive_uart.c:95:6:odrive_write_raw	3
+../Core/Src/odrive_uart.c:105:6:odrive_write	3
+../Core/Src/odrive_uart.c:115:6:odrive_read_raw	7
+../Core/Src/odrive_uart.c:142:6:odrive_read	3
+../Core/Src/odrive_uart.c:152:6:odrive_get_feedback	5
+../Core/Src/odrive_uart.c:179:6:odrive_clear_errors	3
+../Core/Src/odrive_uart.c:190:6:odrive_check_errors	7
+../Core/Src/odrive_uart.c:201:6:odrive_read_current_state	2
+../Core/Src/odrive_uart.c:212:6:odrive_request_state	1
