@@ -850,19 +850,6 @@ python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_
 | SCARA timing error | Pick may happen too early or late | Use encoder-based timing and calibration offset |
 | Vacuum grip failure | Glove may not lift correctly | Test suction cup size, pressure, and contact time |
 
----
-
-## 🧪 Viva / Explanation Summary
-
-If asked what was finally done in the computer vision part:
-
-> We built a YOLO-based real-time glove inspection prototype for conveyor footage. The working model is a YOLO11n detector with three classes: `left_glove`, `right_glove`, and `unclear_glove`. We originally explored YOLO-pose, but empty gloves are deformable, folded, crumpled, and frequently hide their thumb or fingers, so keypoints were not reliable enough for the MVP. The final detection model was trained from 608 annotated factory frames. We then built a live Tkinter UI that performs detection, centroid tracking, trigger-line crossing, PASS/PICK decisions, command logging, warning beeps, a large red SCARA alert, COM-port selection, USB-CDC transmission, and optional STM32 acknowledgements. Left gloves pass, while right and unclear gloves generate one PICK command per tracked glove. The current next stage is to implement the STM32 USB-CDC parser, verify acknowledgements without motors, and then calibrate image pixels into SCARA coordinates before enabling ODrive motion.
-
-If asked about the whole system:
-
-> The full project is an automated conveyor-belt inspection and rejection system. The camera detects and classifies gloves, the decision layer decides pass/reject/manual, and the planned parallel SCARA robot removes wrong or uncertain gloves using a pneumatic/vacuum gripper. The STM32H7 handles real-time robot and encoder timing, while the PC or Jetson handles computer vision inference.
-
----
 
 ## 🚀 Next Steps
 
