@@ -108,17 +108,19 @@ For the MVP, this is safer than trying to achieve unrealistic 100% classificatio
                                 ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                    DECISION + TRACKING LAYER                 │
-│  PASS / REJECT / MANUAL decision                             │
-│  Future: tracker to avoid duplicate commands                 │
+│  PASS / PICK decision                                        │
+│  Centroid tracking to avoid duplicate commands               │
+│  Configurable robot trigger line                             │
 │  Future: temporal voting over multiple frames                │
 └───────────────────────────────┬─────────────────────────────┘
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                       CONTROL LAYER                         │
-│  PC or Jetson command queue                                  │
-│  JSON command over UART / serial                             │
-│  STM32H7 real-time controller                                │
+│  PC-side live UI and command generation                      │
+│  USB-CDC serial link to STM32H7                              │
+│  Line-based ASCII PICK command protocol                      │
+│  STM32 acknowledgement support                               │
 │  Encoder-based pick timing, planned                          │
 └───────────────────────────────┬─────────────────────────────┘
                                 │
@@ -184,19 +186,37 @@ The real-time control layer is planned around an **STM32H7 microcontroller**. Th
 | Solenoid valves | Pneumatic/vacuum gripper control |
 | Status display/LEDs | Operator feedback |
 
-### Planned serial command format
+### Current PC-to-STM32 command format
 
-```json
-{
-  "cmd": "pick",
-  "track_id": 42,
-  "decision": "REJECT",
-  "reason": "wrong_hand_or_unclear",
-  "bbox": [120, 180, 640, 520],
-  "confidence": 0.91,
-  "timestamp": 1720100234.512
-}
+The live UI now generates a line-based ASCII command over USB-CDC:
+
+```text
+PICK,ID=17,CLASS=RIGHT,X=428,Y=315,CONF=0.942,FRAME=1832
 ```
+
+For an unclear glove:
+
+```text
+PICK,ID=21,CLASS=UNCLEAR,X=506,Y=287,CONF=0.713,FRAME=1901
+```
+
+The STM32 can acknowledge a processed command using:
+
+```text
+ACK,ID=17
+```
+
+Current field meanings:
+
+| Field | Meaning |
+|---|---|
+| `ID` | Tracked glove ID used to avoid duplicate commands |
+| `CLASS` | `RIGHT` or `UNCLEAR` |
+| `X`, `Y` | Current glove centre in image pixels |
+| `CONF` | YOLO confidence |
+| `FRAME` | Video frame index |
+
+> The current `X` and `Y` values are still image-pixel coordinates. Pixel-to-conveyor and conveyor-to-SCARA calibration must be completed before these values are used as robot positions.
 
 ### Planned pick timing
 
@@ -307,24 +327,95 @@ This was selected for the urgent MVP because it avoids dependence on incomplete 
 
 ---
 
-## 🆕 Latest Vision Work Done Today
+## 🆕 Latest Vision and Integration Work Completed
 
-Today’s work focused on converting the annotated factory-frame dataset into a complete, testable YOLO detection workflow.
+The current GRIP vision stage has progressed from model training into a working live inspection interface with tracking, decision logic, alerts, and STM32 communication support.
+
+### Completed model and testing work
 
 | Step | Completed work |
 |---|---|
 | 1 | Annotated factory frames using the custom GRIP annotation UI. |
-| 2 | Reviewed crumpled/blurred frames and labelled visually unsafe samples as `unclear_glove`. |
-| 3 | Decided not to rely on pose for the urgent MVP due to hidden fingers/thumbs. |
-| 4 | Used annotated labels but converted them into YOLO detect format by keeping only bbox + class. |
-| 5 | Created a 70/20/10 train/validation/test split. |
-| 6 | Trained a YOLO11n detect model in Google Colab. |
-| 7 | Saved the best validation checkpoint as `best.pt`. |
-| 8 | Generated confusion matrices, label plots, mAP curves, precision/recall curves, CSV reports, and ONNX export. |
-| 9 | Uploaded the result package into `Vision/GRIP_YOLO_detect_results_package/`. |
-| 10 | Prepared a separate video detector tester script for testing `best.pt` on a mixed conveyor video. |
+| 2 | Labelled visually unsafe, folded, blurred, or crumpled samples as `unclear_glove`. |
+| 3 | Converted the earlier YOLO-pose-style dataset into YOLO detection labels by retaining bounding-box and class information. |
+| 4 | Created a 70/20/10 train/validation/test split. |
+| 5 | Trained a YOLO11n three-class detection model and saved the best checkpoint as `best.pt`. |
+| 6 | Trained and collected additional YOLO11s and YOLO11m checkpoints for comparison. |
+| 7 | Built a mixed-video tester with adjustable confidence, image size, NMS IoU, screenshots, and CSV logging. |
+| 8 | Built a model-comparison script to compare accuracy metrics and CPU inference speed. |
+| 9 | Confirmed that `best.pt` is the fastest current model on the test laptop CPU, at approximately 28 FPS in the comparison run. |
+| 10 | Built a complete Tkinter-based live UI for video/camera inference. |
 
-### Annotated dataset before split
+### Current live UI features
+
+The current application is:
+
+```text
+grip_live_ui_scara_alert_fixed.py
+```
+
+It includes:
+
+- model selection and loading
+- camera or video-file input
+- live YOLO bounding boxes
+- class, confidence, track ID, and centre-pixel display
+- adjustable confidence, NMS IoU, input size, and minimum area
+- centroid tracking to avoid repeated commands for the same glove
+- configurable robot trigger line
+- direction options: `either`, `down`, `up`, `left`, and `right`
+- live counters for left, right, unclear, and generated commands
+- scrollable settings panel
+- USB-CDC COM-port discovery and connection
+- optional STM32 acknowledgement handling
+- safe simulation mode
+- armed serial-output mode
+- warning beeps and a large red `SCARA PICKS` alert
+- manual alert-test button
+
+### Current decision logic
+
+```text
+left_glove    → PASS
+right_glove   → PICK
+unclear_glove → PICK / recheck
+```
+
+A PICK command is not generated every frame. The UI tracks each glove and generates a command only when the tracked centre crosses the configured robot trigger line.
+
+### Current safety behaviour
+
+The UI starts in:
+
+```text
+SIMULATION
+```
+
+In simulation mode, it logs:
+
+```text
+SIMULATED TX: PICK,...
+```
+
+without transmitting anything to the STM32.
+
+Actual USB-CDC transmission is enabled only after:
+
+1. the STM32 COM port is selected and connected,
+2. `ARM OUTPUT: send PICK commands` is checked,
+3. the user confirms the safety warning,
+4. a right or unclear glove crosses the trigger line.
+
+### Visual and audio alert
+
+When a right glove or unclear glove creates a PICK event, the UI:
+
+- plays a Windows warning sound,
+- shows a large red alert in the detection view,
+- displays `WRONG GLOVE - SCARA PICKS` or `UNCLEAR GLOVE - SCARA PICKS`,
+- displays the corresponding track ID.
+
+### Dataset summary
 
 | Class | Count |
 |---|---:|
@@ -342,37 +433,36 @@ Today’s work focused on converting the annotated factory-frame dataset into a 
 | Test | 62 |
 | **Total** | **608** |
 
-During Colab training, the training set was balanced/expanded for the minority `left_glove` and `right_glove` classes:
+The training set was later balanced/expanded for minority classes:
 
 | Stage | Images |
 |---|---:|
 | Original train split | 425 |
 | Balanced training set used by notebook | 825 |
 
-### Training configuration
+### Current primary model
 
 | Item | Value |
 |---|---|
-| Model | `yolo11n.pt` |
-| Task | YOLO Detect |
+| Model | `best.pt` |
+| Architecture | YOLO11n Detect |
 | Classes | `left_glove`, `right_glove`, `unclear_glove` |
-| Image size | 640 |
-| Max epochs | 100 |
-| Early stopping patience | 20 |
-| Horizontal flip | Disabled |
-| Reason for disabling flip | Horizontal flip changes glove handedness and can corrupt labels |
+| Input size | 640 by default |
+| Current role | Live detection, tracking, and command generation |
+| Current CPU speed | About 28 FPS in the comparison run |
+| Deployment status | Working prototype on laptop |
 
-### Most important safety metric
+### Model-comparison caution
 
-For this project, the most dangerous error is:
+Several models were compared using the same test source, but part of the converted test-label set produced out-of-range label warnings during Ultralytics validation. Therefore, the current ranking is used mainly as a practical speed and prototype comparison, not as a final production-grade accuracy claim.
 
-```text
-true right_glove predicted as left_glove
-```
+`best.pt` is currently preferred because:
 
-This means a wrong-hand glove could pass as a correct glove. This error matters more than overall accuracy.
-
----
+- it loads reliably,
+- it performs well visually on the mixed factory video,
+- it is significantly faster than the YOLO11s and YOLO11m alternatives on CPU,
+- it supports the required three classes,
+- it integrates successfully with the live UI and tracking pipeline.
 
 ## 📊 Latest Vision Results
 
@@ -472,6 +562,10 @@ Glove_Rejection_and_Inspection_Process_-GRIP-/
 │   │
 │   ├── scripts/
 │   │   ├── grip_video_detect_tester.py
+│   │   ├── grip_video_detect_tester_v2.py
+│   │   ├── evaluate_grip_models.py
+│   │   ├── grip_live_ui_scara_alert_fixed.py
+│   │   ├── test_usb_cdc.py
 │   │   ├── grip_model_tester_ui.py
 │   │   ├── grip_yolo_pose_dataset_ui.py
 │   │   └── 03_create_yolo_pose_split.py
@@ -544,35 +638,26 @@ Bad keypoints are worse than missing keypoints.
 
 ---
 
-## ▶️ Running the Latest Vision Model
+## ▶️ Running the Latest Vision System
 
-Place these files in one testing folder:
+### A. Run the mixed-video detector tester
+
+Place these files together:
 
 ```text
 test_folder/
-├── grip_video_detect_tester.py
+├── grip_video_detect_tester_v2.py
 ├── best.pt
-└── Mixed_Dataset_video.mp4
+└── Mixed_GRIP_2026-06-30_09-26-09_recovered.mp4
 ```
 
-Install dependencies:
+Run:
 
 ```bash
-py -3.11 -m venv grip_test_env
-grip_test_env\Scripts\activate
-pip install ultralytics opencv-python numpy
-```
-
-Run the detector tester:
-
-```bash
-python grip_video_detect_tester.py --model best.pt --source Mixed_Dataset_video.mp4 --conf 0.05 --imgsz 960
-```
-
-If detections are missing, reduce confidence and increase image size:
-
-```bash
-python grip_video_detect_tester.py --model best.pt --source Mixed_Dataset_video.mp4 --conf 0.01 --imgsz 1280
+python grip_video_detect_tester_v2.py ^
+  --model best.pt ^
+  --source Mixed_GRIP_2026-06-30_09-26-09_recovered.mp4 ^
+  --conf 0.40
 ```
 
 The correct model should print:
@@ -582,16 +667,64 @@ model.task = detect
 model.names = {0: 'left_glove', 1: 'right_glove', 2: 'unclear_glove'}
 ```
 
-If the window says:
+### B. Run the live GRIP UI
+
+Required files:
 
 ```text
-GRIP YOLO-Pose Test
-This test checks pose quality only
+test_folder/
+├── grip_live_ui_scara_alert_fixed.py
+├── best.pt
+└── Mixed_GRIP_2026-06-30_09-26-09_recovered.mp4
 ```
 
-then the wrong tester script is being used for the latest model.
+Install the additional UI and serial dependencies:
 
----
+```bash
+pip install pillow pyserial
+```
+
+Run:
+
+```bash
+python grip_live_ui_scara_alert_fixed.py
+```
+
+Inside the UI:
+
+1. Load `best.pt`.
+2. Select the mixed video or enter camera index `0`.
+3. Click `Start`.
+4. Keep `ARM OUTPUT` disabled during initial testing.
+5. Set movement to `either` unless belt direction is already confirmed.
+6. Adjust the trigger line so glove centres cross it.
+7. Verify that right/unclear gloves create simulated PICK commands.
+8. Use `Test beep + red SCARA alert` to verify audio and visual alerts.
+
+### C. Connect STM32 USB-CDC
+
+1. Connect the STM32 board by USB.
+2. Click `Refresh`.
+3. Select the STM32 COM port.
+4. Use baud rate `115200`.
+5. Click `Connect`.
+6. Enable `Require STM32 ACK` during communication testing.
+7. Keep motors and ODrive disabled initially.
+8. Enable `ARM OUTPUT` only after the STM32 parser is verified.
+
+Expected transmitted command:
+
+```text
+PICK,ID=17,CLASS=RIGHT,X=428,Y=315,CONF=0.942,FRAME=1832
+```
+
+Expected STM32 reply:
+
+```text
+ACK,ID=17
+```
+
+> At this stage, test communication without moving the SCARA. Robot motion should only be enabled after coordinate calibration, workspace limits, homing, emergency stop, and ODrive safety checks are complete.
 
 ## 💻 Installation for Development
 
@@ -638,11 +771,20 @@ python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_
 - [x] `best.pt`, `last.pt`, `best.onnx`, confusion matrices, and CSV reports generated
 - [x] Latest result package uploaded under `Vision/GRIP_YOLO_detect_results_package/`
 - [x] Video tester script prepared for mixed dataset testing
-- [ ] Test latest `best.pt` with the correct detector tester on mixed video
-- [ ] Save failure cases and false predictions
+- [x] Tested `best.pt` on the recovered mixed factory video
+- [x] Added adjustable confidence, NMS IoU, image size, and trigger-line controls
+- [x] Added centroid tracking to avoid duplicate commands
+- [x] Added PASS/PICK decision logic
+- [x] Added simulation-mode command generation
+- [x] Added USB-CDC COM-port connection support
+- [x] Added STM32 ACK handling
+- [x] Added live counters, event log, scrollable UI, warning sound, and red SCARA alert
+- [x] Compared YOLO11n, YOLO11s, and YOLO11m checkpoints
+- [ ] Save and classify failure cases from the mixed video
+- [ ] Correct remaining test-label conversion issues for final metrics
 - [ ] Collect more balanced left/right/unclear examples
 - [ ] Add temporal voting over multiple frames
-- [ ] Add tracker to avoid duplicate decisions
+- [ ] Add calibrated pixel-to-conveyor and conveyor-to-SCARA conversion
 - [ ] Revisit pose only after a cleaner keypoint dataset is available
 
 ### SCARA mechanical system
@@ -659,12 +801,17 @@ python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_
 
 - [x] STM32H7 selected as real-time control unit
 - [x] Encoder-based timing concept prepared
-- [x] JSON/UART command concept prepared
-- [ ] Implement UART command receiver
+- [x] Serial command concept prepared
+- [x] PC-side USB-CDC PICK command generation implemented
+- [x] COM-port selection and connect/disconnect implemented in the UI
+- [x] Optional `ACK,ID=...` reply handling implemented in the UI
+- [ ] Implement STM32 USB-CDC line receiver and parser
+- [ ] Verify parsed command values without motors enabled
 - [ ] Implement encoder pulse counting
 - [ ] Implement motor control and homing
 - [ ] Integrate robot command queue
-- [ ] Test PC/Jetson to STM32 communication
+- [ ] Test end-to-end PC-to-STM32 acknowledgement
+- [ ] Connect validated commands to ODrive and pneumatic sequence
 
 ### Pneumatic system
 
@@ -676,8 +823,13 @@ python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_
 
 ### Final integration
 
-- [ ] Camera + model + decision pipeline
-- [ ] Decision queue + belt timing
+- [x] Camera/video + model + decision pipeline
+- [x] Tracking + trigger-line command generation
+- [x] Simulation-mode UI with warning alerts
+- [x] PC-side USB-CDC communication interface
+- [ ] STM32 command reception and acknowledgement
+- [ ] Pixel-to-belt and belt-to-SCARA calibration
+- [ ] Decision queue + encoder-based belt timing
 - [ ] STM32 command execution
 - [ ] SCARA pick-and-place test
 - [ ] Manual/reject bin routing
@@ -698,53 +850,60 @@ python -c "import torch; print(torch.cuda.is_available()); print(torch.cuda.get_
 | SCARA timing error | Pick may happen too early or late | Use encoder-based timing and calibration offset |
 | Vacuum grip failure | Glove may not lift correctly | Test suction cup size, pressure, and contact time |
 
----
-
-## 🧪 Viva / Explanation Summary
-
-If asked what was finally done in the computer vision part:
-
-> We built a YOLO-based vision prototype for glove classification on conveyor frames. The final testable model is a YOLO11n detection model trained with three classes: `left_glove`, `right_glove`, and `unclear_glove`. We originally considered YOLO-pose because handedness is a geometry problem, but real gloves are empty, folded, crumpled, and often have hidden thumbs or fingers, so keypoints were not reliable enough for the current dataset. Therefore, for the MVP, we trained a simpler 3-class detection model using 608 annotated factory frames. The dataset was split 70/20/10, trained in Google Colab, and evaluated using confusion matrices, precision, recall, F1-score, mAP curves, and test prediction CSVs. The most important safety metric is not only accuracy, but whether a true right glove is predicted as a left glove, because that would allow a wrong glove to pass.
-
-If asked about the whole system:
-
-> The full project is an automated conveyor-belt inspection and rejection system. The camera detects and classifies gloves, the decision layer decides pass/reject/manual, and the planned parallel SCARA robot removes wrong or uncertain gloves using a pneumatic/vacuum gripper. The STM32H7 handles real-time robot and encoder timing, while the PC or Jetson handles computer vision inference.
-
----
 
 ## 🚀 Next Steps
 
 ### Immediate
 
-1. Test the latest `best.pt` using `grip_video_detect_tester.py` on the mixed video dataset.
-2. Confirm that the script prints `model.task = detect`.
-3. Save screenshots of missed detections and wrong predictions.
-4. Count dangerous errors: true `right_glove` predicted as `left_glove`.
-5. Add more real right and left glove examples from the same test setup.
+1. Connect the STM32H7 through USB-CDC.
+2. Implement a newline-terminated command receiver on STM32.
+3. Parse:
+
+```text
+PICK,ID=17,CLASS=RIGHT,X=428,Y=315,CONF=0.942,FRAME=1832
+```
+
+4. Send back:
+
+```text
+ACK,ID=17
+```
+
+5. Test communication with ODrive and motors disabled.
+6. Confirm that every tracked right/unclear glove produces only one command.
+7. Log missed detections, double detections, and incorrect class changes.
 
 ### Short term
 
-- Add tracker and temporal voting across 5-10 frames.
-- Improve camera lighting and exposure.
-- Retrain with a more balanced dataset.
-- Build a failure-case dataset from mixed-video testing.
+- Correct the remaining converted-label issues in the held-out test set.
+- Re-run final per-class precision, recall, F1, mAP, and confusion-matrix evaluation.
+- Add temporal voting across several frames.
+- Improve tracking for overlapping or closely spaced gloves.
+- Calibrate camera pixels to conveyor-plane millimetres.
+- Measure camera-to-SCARA distance and belt speed.
 
 ### Medium term
 
-- Integrate detection output with a command queue.
-- Implement UART JSON communication to STM32H7.
-- Test conveyor timing using measured belt speed or encoder pulses.
-- Test pneumatic pick on real gloves.
+- Convert conveyor coordinates into SCARA workspace coordinates.
+- Add homing, joint limits, workspace checks, timeout handling, and emergency-stop logic.
+- Connect validated STM32 commands to ODrive.
+- Add the pneumatic suction sequence:
+  - approach,
+  - descend,
+  - vacuum on,
+  - lift,
+  - move to reject bin,
+  - vacuum off,
+  - return home.
+- Add encoder-based pick timing instead of relying only on frame position.
 
 ### Long term
 
-- Deploy model on Jetson Orin Nano.
-- Export and benchmark TensorRT.
-- Add label defect inspection.
+- Deploy the model and UI logic to Jetson Orin Nano.
+- Export and benchmark ONNX/TensorRT.
+- Add label-defect inspection.
 - Add size classification.
-- Complete end-to-end SCARA rejection demo.
-
----
+- Complete the full moving-belt SCARA rejection demonstration.
 
 ## 📚 References and Project Materials
 
