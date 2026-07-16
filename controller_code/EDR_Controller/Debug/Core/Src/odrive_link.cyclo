@@ -1,0 +1,11 @@
+../Core/Src/odrive_link.c:13:6:ODriveLink_Init	1
+../Core/Src/odrive_link.c:19:13:uart_send_line	1
+../Core/Src/odrive_link.c:26:12:uart_read_line	6
+../Core/Src/odrive_link.c:50:6:ODriveLink_SetPosition	1
+../Core/Src/odrive_link.c:58:6:ODriveLink_WriteProperty	1
+../Core/Src/odrive_link.c:65:6:ODriveLink_WriteIntProperty	1
+../Core/Src/odrive_link.c:72:6:ODriveLink_ReadProperty	4
+../Core/Src/odrive_link.c:89:6:ODriveLink_ReadEncoderPos	1
+../Core/Src/odrive_link.c:96:6:ODriveLink_ReadAxisState	2
+../Core/Src/odrive_link.c:106:6:ODriveLink_Ping	2
+../Core/Src/odrive_link.c:114:6:ODriveLink_RequestClosedLoop	1

@@ -42,14 +42,20 @@ extern "C" {
 #define ODRIVE_LINE_BUF_SIZE    128
 #define ODRIVE_DEFAULT_TIMEOUT_MS 300
 
-/* ODrive axis state constants (fw 0.5.x AXIS_STATE_*) */
+/* ODrive axis state constants (fw 0.5.x AXIS_STATE_*).
+ *
+ * NOTE: ODRIVE_AXIS_STATE_HOMING is intentionally NOT defined here anymore.
+ * This build uses SPI absolute encoders (AMS AS5047/AS5048) with no limit
+ * switches, so ODrive-firmware endstop-homing doesn't apply - the zero
+ * reference is a purely software value (see scara_app.c's
+ * capture/sync-based zero reference in scara_app.c), matching the updated
+ * Python dashboard. */
 typedef enum {
     ODRIVE_AXIS_STATE_UNDEFINED = 0,
     ODRIVE_AXIS_STATE_IDLE = 1,
     ODRIVE_AXIS_STATE_MOTOR_CALIBRATION = 4,
     ODRIVE_AXIS_STATE_ENCODER_OFFSET_CALIBRATION = 7,
     ODRIVE_AXIS_STATE_CLOSED_LOOP_CONTROL = 8,
-    ODRIVE_AXIS_STATE_HOMING = 11,
 } odrive_axis_state_t;
 
 typedef struct {
@@ -112,6 +118,11 @@ bool odrive_read_current_state(odrive_uart_t *ctx, int axis, odrive_axis_state_t
  * non-blocking pieces so it fits a superloop state machine instead of a
  * worker thread). */
 bool odrive_request_state(odrive_uart_t *ctx, int axis, odrive_axis_state_t state);
+
+/* "ss\n" - save configuration to flash and reboot. Fire-and-forget like
+ * odrive_write() - the device typically drops the UART link mid-reply as
+ * it reboots, so there's nothing useful to wait for. */
+bool odrive_save_and_reboot(odrive_uart_t *ctx);
 
 #ifdef __cplusplus
 }

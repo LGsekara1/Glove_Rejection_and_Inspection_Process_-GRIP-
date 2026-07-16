@@ -1,0 +1,4 @@
+../Core/Src/motion.c:10:14:joint_deg_to_turns	40	static
+../Core/Src/motion.c:16:14:turns_to_joint_deg	40	static
+../Core/Src/motion.c:29:14:Motion_PrepareMove	144	static
+../Core/Src/motion.c:95:6:Motion_StreamTick	48	static

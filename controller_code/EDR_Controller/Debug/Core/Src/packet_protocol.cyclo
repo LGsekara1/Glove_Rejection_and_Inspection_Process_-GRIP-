@@ -1,0 +1,15 @@
+../Core/Src/packet_protocol.c:14:13:Packet_DebugPrint	2
+../Core/Src/packet_protocol.c:45:16:Packet_Checksum	2
+../Core/Src/packet_protocol.c:54:13:Packet_SerializePayload	1
+../Core/Src/packet_protocol.c:66:13:Packet_DeserializePayload	1
+../Core/Src/packet_protocol.c:76:13:Packet_ResetParser	1
+../Core/Src/packet_protocol.c:83:16:Packet_SendFrame	3
+../Core/Src/packet_protocol.c:113:6:Packet_Init	1
+../Core/Src/packet_protocol.c:118:9:Packet_SendData	1
+../Core/Src/packet_protocol.c:123:9:Packet_SendAck	1
+../Core/Src/packet_protocol.c:129:6:Packet_ReceiveBytes	14
+../Core/Src/packet_protocol.c:200:28:Packet_OnDataFromLaptop	1
+../Core/Src/packet_protocol.c:208:28:Packet_OnAckToLaptop	1
+../Core/Src/packet_protocol.c:216:28:Packet_OnFrameError	1
+../Core/Src/packet_protocol.c:223:28:Packet_OnRawBytesReceived	3
+../Core/Src/packet_protocol.c:236:28:Packet_OnRawBytesTransmitted	3

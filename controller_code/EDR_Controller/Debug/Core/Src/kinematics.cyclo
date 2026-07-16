@@ -1,4 +1,4 @@
-../Core/Src/kinematics.c:4:7:turns_to_joint_deg	1
-../Core/Src/kinematics.c:10:7:joint_deg_to_turns	1
-../Core/Src/kinematics.c:18:13:circle_intersection	8
-../Core/Src/kinematics.c:52:6:forward_kinematics	1
+../Core/Src/kinematics.c:5:6:solve_arm_angle	7
+../Core/Src/kinematics.c:27:6:inverse_kinematics	3
+../Core/Src/kinematics.c:44:6:circle_intersection	8
+../Core/Src/kinematics.c:68:6:forward_kinematics	5

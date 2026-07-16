@@ -22,6 +22,7 @@
 #include "usbd_cdc_if.h"
 
 /* USER CODE BEGIN INCLUDE */
+#include "packet_protocol.h"
 
 /* USER CODE END INCLUDE */
 
@@ -31,7 +32,7 @@
 
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
-
+volatile uint8_t CDC_IsInReceiveCallback = 0;
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -261,9 +262,19 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
-  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
+  if ((Buf != NULL) && (Len != NULL) && (*Len > 0U)) {
+    CDC_IsInReceiveCallback = 1;
+    Packet_ReceiveBytes(Buf, *Len);
+    CDC_IsInReceiveCallback = 0;
+  }
+
+  /* Re-arm the endpoint with the application RX buffer to avoid reusing the
+     transient callback buffer and to keep the CDC data path stable. */
+  USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
+
   return (USBD_OK);
+
   /* USER CODE END 6 */
 }
 

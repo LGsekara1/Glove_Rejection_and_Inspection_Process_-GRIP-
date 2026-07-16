@@ -1,34 +1,48 @@
 /* USER CODE BEGIN Header */
 /**
-  ******************************************************************************
-  * @file           : main.c
-  * @brief          : Main program body
-  ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
-  */
+ ******************************************************************************
+ * @file           : main.c
+ * @brief          : Main program body
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2026 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "dma.h"
+#include "quadspi.h"
+#include "rtc.h"
+#include "tim.h"
+#include "usart.h"
 #include "usb_device.h"
+#include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "packet_protocol.h"
 #include "odrive_can_commands.h"
-#include "scara_app.h"
-
+//#include "scara_app.h"
 
 #include "usbd_cdc_if.h"
 #include <stdio.h>
 #include <string.h>
+
+//Odrive motion
+#include <stdarg.h>
+#include "app_config.h"
+#include "odrive_link.h"
+#include "motion.h"
+#include "app_log.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,36 +62,35 @@
 
 /* Private variables ---------------------------------------------------------*/
 
-QSPI_HandleTypeDef hqspi;
-
-RTC_HandleTypeDef hrtc;
-
-UART_HandleTypeDef huart4;
-UART_HandleTypeDef huart5;
-
 /* USER CODE BEGIN PV */
 
+volatile uint8_t g_control_tick_flag = 0;
+static bool s_move_active = false;
 
 uint8_t buffer[1024];
 char msg[100];
 
 //-------ASCII commands for Odrive with UART---------
 char fullCallib[] = "w axis0.requested_state 3\n";
-char en8[] = "w axis0.requested_state 8\n";
+char closedLoop0[] = "w axis0.requested_state 8\n";
+char closedLoop1[] = "w axis1.requested_state 8\n";
+
 char saveConfig[] = "ss";
 char trapezoidal[] = "t 0 -2\n";
 char motor_velo[] = "v 0 1 0\n";
 char read_voltage[] = "r vbus_voltage\n";
 
-
 uint8_t uart4_rx_buf[8];
 uint8_t uart5_rx_buf[8];
-
 
 uint16_t uart4_rx_index = 0;
 uint16_t uart5_rx_index = 0;
 
-
+//Sample data for transmission from vision controller
+uint32_t lastSendTick = 0;
+const uint32_t SEND_INTERVAL_MS = 500; /* send a sample packet every 500ms */
+int16_t sampleX = 0;
+int16_t sampleY = 0;
 
 //FDCAN_FilterTypeDef filter;
 //FDCAN_TxHeaderTypeDef txHeader;
@@ -93,14 +106,13 @@ uint16_t uart5_rx_index = 0;
 //uint8_t rxData[8];
 //uint8_t indx;
 //DISPLAY CHECKING
-static const uint8_t NX_TERM[3] = {0xFF, 0xFF, 0xFF};
-/* One-byte-at-a-time RX state machine for Nextion touch events.
- * Packet format: 0x65 <page_id> <component_id> <event> 0xFF 0xFF 0xFF
- * event: 0x01 = press, 0x00 = release. We act on release. */
-static uint8_t nx_rx_byte;            // scratch byte HAL writes into
-static uint8_t nx_pkt[7];             // assembled packet
-static uint8_t nx_pkt_idx = 0;
-
+//static const uint8_t NX_TERM[3] = {0xFF, 0xFF, 0xFF};
+///* One-byte-at-a-time RX state machine for Nextion touch events.
+// * Packet format: 0x65 <page_id> <component_id> <event> 0xFF 0xFF 0xFF
+// * event: 0x01 = press, 0x00 = release. We act on release. */
+//static uint8_t nx_rx_byte;            // scratch byte HAL writes into
+//static uint8_t nx_pkt[7];             // assembled packet
+//static uint8_t nx_pkt_idx = 0;
 
 /* USER CODE END PV */
 
@@ -108,77 +120,113 @@ static uint8_t nx_pkt_idx = 0;
 void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_QUADSPI_Init(void);
-static void MX_RTC_Init(void);
-static void MX_UART5_Init(void);
-static void MX_UART4_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-//--------for display--------------------
-static void nx_send(UART_HandleTypeDef *huart, const char *cmd)
+
+void cdc_log(const char *fmt, ...) /* <-- no 'static' anymore */
 {
-    HAL_UART_Transmit(huart, (uint8_t *)cmd, strlen(cmd), 100);
-    HAL_UART_Transmit(huart, (uint8_t *)NX_TERM, 3, 100);
+	char buf[128];
+	va_list args;
+	va_start(args, fmt);
+	int len = vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+	if (len > 0)
+		CDC_Transmit_FS((uint8_t*) buf, (uint16_t) len);
 }
+
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
+	if (htim->Instance == TIM6) {
+		g_control_tick_flag = 1;
+	}
+}
+
+//--------for display--------------------
+//static void nx_send(UART_HandleTypeDef *huart, const char *cmd)
+//{
+//    HAL_UART_Transmit(huart, (uint8_t *)cmd, strlen(cmd), 100);
+//    HAL_UART_Transmit(huart, (uint8_t *)NX_TERM, 3, 100);
+//}
 /* USER CODE END 0 */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
-  */
-int main(void)
-{
+ * @brief  The application entry point.
+ * @retval int
+ */
+int main(void) {
 
-  /* USER CODE BEGIN 1 */
+	/* USER CODE BEGIN 1 */
 
-  /* USER CODE END 1 */
+	/* USER CODE END 1 */
 
-  /* MPU Configuration--------------------------------------------------------*/
-  MPU_Config();
+	/* MPU Configuration--------------------------------------------------------*/
+	MPU_Config();
 
-  /* MCU Configuration--------------------------------------------------------*/
+	/* MCU Configuration--------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
+	/* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+	HAL_Init();
 
-  /* USER CODE BEGIN Init */
+	/* USER CODE BEGIN Init */
 
 //Adding scara GUI
-  scara_app_init();
+//  scara_app_init();
 //  HAL_PWR_EnableBkUpAccess();
 //
 //  if (__HAL_RCC_GET_RTC_SOURCE() != RCC_RTCCLKSOURCE_LSE) {
 //      __HAL_RCC_BACKUPRESET_FORCE();
 //      __HAL_RCC_BACKUPRESET_RELEASE();
 //  }
-  /* USER CODE END Init */
+	/* USER CODE END Init */
 
-  /* Configure the system clock */
-  SystemClock_Config();
+	/* Configure the system clock */
+	SystemClock_Config();
 
-  /* Configure the peripherals common clocks */
-  PeriphCommonClock_Config();
+	/* Configure the peripherals common clocks */
+	PeriphCommonClock_Config();
 
-  /* USER CODE BEGIN SysInit */
+	/* USER CODE BEGIN SysInit */
 
-  /* USER CODE END SysInit */
+	/* USER CODE END SysInit */
 
-  /* Initialize all configured peripherals */
-  MX_GPIO_Init();
-  MX_QUADSPI_Init();
-  MX_RTC_Init();
-  MX_UART5_Init();
-  MX_UART4_Init();
-  MX_USB_DEVICE_Init();
-  /* USER CODE BEGIN 2 */
+	/* Initialize all configured peripherals */
+	MX_GPIO_Init();
+	MX_DMA_Init();
+	MX_QUADSPI_Init();
+	MX_RTC_Init();
+	MX_UART5_Init();
+	MX_USB_DEVICE_Init();
+	MX_UART7_Init();
+	MX_TIM6_Init();
+	/* USER CODE BEGIN 2 */
+
+	//Initial startup procedure
+	HAL_Delay(6000);
+	HAL_GPIO_WritePin(Relay_EN_GPIO_Port, Relay_EN_Pin, GPIO_PIN_SET);
+	HAL_Delay(4000);
+	HAL_GPIO_WritePin(ODrive_NRST_GPIO_Port, ODrive_NRST_Pin, GPIO_PIN_RESET);
+	HAL_Delay(3000);
+	HAL_GPIO_WritePin(ODrive_NRST_GPIO_Port, ODrive_NRST_Pin, GPIO_PIN_SET);
+
+	ODriveLink_Init(&huart5);
+	HAL_Delay(500); /* let USB CDC enumerate before first log */
+
+	cdc_log("Preparing move to (%.2f, %.2f) mm...\r\n", (double) TARGET_X_MM,
+			(double) TARGET_Y_MM);
+	motion_err_t err = Motion_PrepareMove();
+	if (err != MOTION_ERR_NONE) {
+		cdc_log("Motion_PrepareMove failed: err=%d - aborting.\r\n", (int) err);
+	} else {
+		cdc_log("Profile built. Starting 100 Hz streaming.\r\n");
+		HAL_TIM_Base_Start_IT(&htim6);
+		s_move_active = true;
+	}
+
 //Alterntative for interrup **Not checked with hardware
 //  odrive_uart_init(&odrv, &huart5);
-
 
 //  rcc_cr_snapshot = RCC->CR;
 //
@@ -191,8 +239,6 @@ int main(void)
 //  // actual system clock frequency
 //  sysclk_hz = HAL_RCC_GetSysClockFreq();
 
-
-
 ////
 ////------------starting  fdcan2-----------------------------------
 //HAL_FDCAN_Start(&hfdcan2);
@@ -203,7 +249,6 @@ int main(void)
 //          &hfdcan2,
 //          FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
 //          0);
-
 
 //  //-------Debugging with status checks for CAN init
 //  HAL_StatusTypeDef ret;
@@ -228,28 +273,57 @@ int main(void)
 //	 if(status != HAL_OK){
 //
 //	 }
+//  HAL_Delay(2000);
 //  sprintf((char*)buffer,"Starting!");
 //  CDC_Transmit_FS(buffer, strlen((char*)buffer));
 //
-
-//  HAL_UART_Receive_IT(&huart5, uart_rx_buf, 1);
-//  HAL_UART_Receive_IT(&huart4,uart_rx_buf,1);
+//
+////  HAL_UART_Receive_IT(&huart5, uart_rx_buf, 1);
+//  HAL_UART_Receive_IT(&huart5,uart5_rx_buf,1);
 ////
 //  HAL_StatusTypeDef uart_status = HAL_UART_Transmit(&huart5, (uint8_t*)fullCallib, strlen(fullCallib), 1000);
 //  HAL_Delay(10000);
 //  HAL_UART_Transmit(&huart5, (uint8_t*)saveConfig, strlen(saveConfig), 1000);
 //  HAL_Delay(5000);
-  // Confirm the link is alive at all: force page 0
-  	  HAL_UART_Receive_IT(&huart4, &nx_rx_byte, 1); /* arm first byte */
-      nx_send(&huart4, "page 0");
+	// Confirm the link is alive at all: force page 0
+//  HAL_UART_Receive_IT(&huart4, &nx_rx_byte, 1); /* arm first byte */
+//  nx_send(&huart4, "page 0");
 //      HAL_Delay(100);
 
-  /* USER CODE END 2 */
+//  Packet_Init();
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
-  while (1)
-  {
+//	scara_app_init();
+
+	/* USER CODE END 2 */
+
+	/* Infinite loop */
+	/* USER CODE BEGIN WHILE */
+	while (1) {
+
+		if (g_control_tick_flag) {
+			g_control_tick_flag = 0;
+			if (s_move_active) {
+				bool still_running = Motion_StreamTick();
+				if (!still_running) {
+					s_move_active = false;
+					HAL_TIM_Base_Stop_IT(&htim6);
+					cdc_log("Move complete.\r\n");
+					HAL_Delay(5000);
+					HAL_GPIO_WritePin(MCU_Pneu_5_2_GPIO_Port, MCU_Pneu_5_2_Pin,
+							GPIO_PIN_SET);
+					HAL_Delay(2000);
+					HAL_GPIO_WritePin(MCU_Pneu_3_GPIO_Port, MCU_Pneu_3_Pin,
+							GPIO_PIN_SET);
+					HAL_Delay(1000);
+					HAL_GPIO_WritePin(MCU_Pneu_5_2_GPIO_Port, MCU_Pneu_5_2_Pin,
+							GPIO_PIN_RESET);
+					HAL_Delay(5000);
+					HAL_GPIO_WritePin(MCU_Pneu_3_GPIO_Port, MCU_Pneu_3_Pin,
+							GPIO_PIN_RESET);
+					HAL_Delay(10000);
+				}
+			}
+		}
 
 //----GPIO toggle check-------------------
 //
@@ -258,7 +332,7 @@ int main(void)
 //	  HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_RESET);
 //	  HAL_Delay(1000);
 
-	  /* Read time first */
+		/* Read time first */
 //	      HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
 //
 //	      /* Then read date (required to unlock the shadow registers) */
@@ -274,8 +348,6 @@ int main(void)
 ////	                          strlen(msg));
 //
 //	      HAL_Delay(1000);
-
-
 //-----HSE check------------------------
 //	  if(__HAL_RCC_GET_FLAG(RCC_FLAG_HSERDY))
 //	  	  	  HAL_GPIO_WritePin(GPIOC,GPIO_PIN_4, 1);
@@ -286,15 +358,11 @@ int main(void)
 //	 sysclk_hz = HAL_RCC_GetSysClockFreq();
 //
 //	 HAL_Delay(500);
-
 //CDC check
 //	  sprintf((char*)buffer,"CDC up and running!\n");
 //	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
 //	  HAL_Delay(1000);
-
-
 //---------------CAN---------------------------------
-
 //   for (int i=0; i<8; i++)
 //   {
 //	txData[i] = indx++;
@@ -306,7 +374,6 @@ int main(void)
 //   {
 //	Error_Handler();
 //   }
-
 //-----Clear errors and read bus voltage
 //	  uint8_t txData[8] = {0};
 //	  uint32_t data =0 ;
@@ -314,14 +381,11 @@ int main(void)
 //	  txHeader.Identifier = ODrive_Get_CAN_ID(0, CMD_CLEAR_ERRORS);
 //	  txHeader.DataLength = FDCAN_DLC_BYTES_0;
 //	  HAL_StatusTypeDef ret = HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &txHeader, txData);
-
-
 //	  HAL_Delay(2000);
 //	  txHeader.Identifier = ODrive_Get_CAN_ID(0, CMD_GET_BUS_VOLTAGE_AND_CURRENT);
 //	  txHeader.TxFrameType = FDCAN_REMOTE_FRAME;
 //	  txHeader.DataLength = FDCAN_DLC_BYTES_8;   // requested length
 //	  HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &txHeader, txData);
-
 //	  FDCAN_ProtocolStatusTypeDef status;
 //	  HAL_FDCAN_GetProtocolStatus(&hfdcan2, &status);
 //	  sprintf((char*)buffer, "LEC:%lu DLEC:%lu EP:%d BO:%d\r\n",
@@ -329,9 +393,7 @@ int main(void)
 //	          status.ErrorPassive, status.BusOff);
 //	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
 //	  HAL_Delay(2000);
-
-//--closed loop motor control
-
+//--closed loop motor control with FDCAN
 //	  uint32_t state = 3;
 //	  memcpy(txData, &state, sizeof(state));
 //	  txHeader.Identifier = ODrive_Get_CAN_ID(0, CMD_SET_AXIS_REQUESTED_STATE);
@@ -342,7 +404,6 @@ int main(void)
 //	          txData
 //	  );
 //	  HAL_Delay(6000);
-
 //	  uint8_t data[8] = {0};
 //
 //	  uint32_t state = 8;   // CLOSED_LOOP_CONTROL
@@ -355,15 +416,9 @@ int main(void)
 //	      data,
 //	      8
 //	  );
-
-
 //   HAL_Delay (1000);
-
-
-//------------------Odrive testing-----------------------------
-
+//------------------Odrive testing with UART -----------------------------
 //	  HAL_Delay(500);
-
 //	  // Diagnostic feedback
 //	  if(uart_status == HAL_OK) {
 //		  sprintf((char*)buffer,"UART TX OK\r\n");
@@ -376,9 +431,7 @@ int main(void)
 //	  }
 //	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
 //	  HAL_Delay(500);
-
-
-//
+//-------------Reading bus voltage from Odrive
 //	  HAL_UART_Transmit(&huart5, (uint8_t*)read_voltage, strlen(read_voltage), 1000);
 //	  HAL_Delay(4000);
 //
@@ -391,446 +444,154 @@ int main(void)
 //	      sprintf((char*)buffer, "ODrive UART read failed (check wiring/baud)\r\n");
 //	  }
 //	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-
-
-//	  HAL_UART_Transmit(&huart5, (uint8_t*)motor_velo, strlen(motor_velo), 1000);
-//
+//	  HAL_UART_Transmit(&huart5, (uint8_t*)closedLoop0, strlen(closedLoop0), 1000);
+//	  HAL_UART_Transmit(&huart5, (uint8_t*)closedLoop1, strlen(closedLoop1), 1000);
+//--------------------------------------pNEUMATIC activation---------------------------------------
+//	  HAL_GPIO_WritePin(MCU_Pneu_5_2_GPIO_Port, MCU_Pneu_5_2_Pin,GPIO_PIN_SET);
+//	  HAL_Delay(2000);
+//	  HAL_GPIO_WritePin(MCU_Pneu_3_GPIO_Port, MCU_Pneu_3_Pin, GPIO_PIN_SET);
+//	  HAL_Delay(1000);
+//	  HAL_GPIO_WritePin(MCU_Pneu_5_2_GPIO_Port, MCU_Pneu_5_2_Pin,GPIO_PIN_RESET);
+//	  HAL_Delay(2000);
+//	  HAL_GPIO_WritePin(MCU_Pneu_3_GPIO_Port, MCU_Pneu_3_Pin, GPIO_PIN_RESET);
 //	  HAL_Delay(10000);
-
-	  //non-blocking, call every loop iteration
-//	  scara_app_poll();
-
-
-
+		//non-blocking, call every loop iteration
+//		scara_app_poll();
 //-----------Display test
 //	  nx_send(&huart4, "t0.txt=\"GPIO HIGH\"");
 //	         HAL_Delay(500);
 //	         nx_send(&huart4, "t0.txt=\"GPIO LOW\"");
 //	         HAL_Delay(500);
+//------------Vision controller protocol-----------------
+//	  if ((HAL_GetTick() - lastSendTick) >= SEND_INTERVAL_MS)
+//	      {
+//	          lastSendTick = HAL_GetTick();
+//
+//	          /* Replace with real data, e.g. current five-bar end-effector
+//	           * coordinates from your kinematics module */
+//	          sampleX += 10;
+//	          sampleY += 5;
+//
+//	          uint8_t status = Packet_SendData(sampleX, sampleY, HAL_GetTick());
+//
+//	          if (status != USBD_OK)
+//	          {
+//	              char msg[64];
+//	              sprintf(msg, "[TX FAIL] CDC busy or not connected (status=%d)\r\n", status);
+//	              CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
+//	          }
+//
+//	      }
+	}
+	/* USER CODE END WHILE */
 
-    /* USER CODE END WHILE */
+	/* USER CODE BEGIN 3 */
 
-    /* USER CODE BEGIN 3 */
-
-  }
-  /* USER CODE END 3 */
+	/* USER CODE END 3 */
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
-  */
-void SystemClock_Config(void)
-{
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+ * @brief System Clock Configuration
+ * @retval None
+ */
+void SystemClock_Config(void) {
+	RCC_OscInitTypeDef RCC_OscInitStruct = { 0 };
+	RCC_ClkInitTypeDef RCC_ClkInitStruct = { 0 };
 
-  /** Supply configuration update enable
-  */
-  HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
+	/** Supply configuration update enable
+	 */
+	HAL_PWREx_ConfigSupply(PWR_LDO_SUPPLY);
 
-  /** Configure the main internal regulator output voltage
-  */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+	/** Configure the main internal regulator output voltage
+	 */
+	__HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
-  while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
+	while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {
+	}
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_LSI
-                              |RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.LSIState = RCC_LSI_ON;
-  RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 2;
-  RCC_OscInitStruct.PLL.PLLN = 64;
-  RCC_OscInitStruct.PLL.PLLP = 2;
-  RCC_OscInitStruct.PLL.PLLQ = 7;
-  RCC_OscInitStruct.PLL.PLLR = 2;
-  RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
-  RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
-  RCC_OscInitStruct.PLL.PLLFRACN = 0;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-  {
-    Error_Handler();
-  }
+	/** Initializes the RCC Oscillators according to the specified parameters
+	 * in the RCC_OscInitTypeDef structure.
+	 */
+	RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48
+			| RCC_OSCILLATORTYPE_LSI | RCC_OSCILLATORTYPE_HSE;
+	RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+	RCC_OscInitStruct.LSIState = RCC_LSI_ON;
+	RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
+	RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+	RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+	RCC_OscInitStruct.PLL.PLLM = 2;
+	RCC_OscInitStruct.PLL.PLLN = 64;
+	RCC_OscInitStruct.PLL.PLLP = 2;
+	RCC_OscInitStruct.PLL.PLLQ = 7;
+	RCC_OscInitStruct.PLL.PLLR = 2;
+	RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
+	RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
+	RCC_OscInitStruct.PLL.PLLFRACN = 0;
+	if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
+		Error_Handler();
+	}
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2
-                              |RCC_CLOCKTYPE_D3PCLK1|RCC_CLOCKTYPE_D1PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
-  RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
+	/** Initializes the CPU, AHB and APB buses clocks
+	 */
+	RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+			| RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 | RCC_CLOCKTYPE_D3PCLK1
+			| RCC_CLOCKTYPE_D1PCLK1;
+	RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+	RCC_ClkInitStruct.SYSCLKDivider = RCC_SYSCLK_DIV1;
+	RCC_ClkInitStruct.AHBCLKDivider = RCC_HCLK_DIV2;
+	RCC_ClkInitStruct.APB3CLKDivider = RCC_APB3_DIV2;
+	RCC_ClkInitStruct.APB1CLKDivider = RCC_APB1_DIV2;
+	RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
+	RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
+	if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK) {
+		Error_Handler();
+	}
 }
 
 /**
-  * @brief Peripherals Common Clock Configuration
-  * @retval None
-  */
-void PeriphCommonClock_Config(void)
-{
-  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+ * @brief Peripherals Common Clock Configuration
+ * @retval None
+ */
+void PeriphCommonClock_Config(void) {
+	RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = { 0 };
 
-  /** Initializes the peripherals clock
-  */
-  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_UART5|RCC_PERIPHCLK_UART4;
-  PeriphClkInitStruct.PLL2.PLL2M = 2;
-  PeriphClkInitStruct.PLL2.PLL2N = 12;
-  PeriphClkInitStruct.PLL2.PLL2P = 2;
-  PeriphClkInitStruct.PLL2.PLL2Q = 3;
-  PeriphClkInitStruct.PLL2.PLL2R = 2;
-  PeriphClkInitStruct.PLL2.PLL2RGE = RCC_PLL2VCIRANGE_3;
-  PeriphClkInitStruct.PLL2.PLL2VCOSEL = RCC_PLL2VCOMEDIUM;
-  PeriphClkInitStruct.PLL2.PLL2FRACN = 0;
-  PeriphClkInitStruct.Usart234578ClockSelection = RCC_USART234578CLKSOURCE_PLL2;
-  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
-  {
-    Error_Handler();
-  }
-}
-
-/**
-  * @brief QUADSPI Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_QUADSPI_Init(void)
-{
-
-  /* USER CODE BEGIN QUADSPI_Init 0 */
-
-  /* USER CODE END QUADSPI_Init 0 */
-
-  /* USER CODE BEGIN QUADSPI_Init 1 */
-
-  /* USER CODE END QUADSPI_Init 1 */
-  /* QUADSPI parameter configuration*/
-  hqspi.Instance = QUADSPI;
-  hqspi.Init.ClockPrescaler = 255;
-  hqspi.Init.FifoThreshold = 1;
-  hqspi.Init.SampleShifting = QSPI_SAMPLE_SHIFTING_NONE;
-  hqspi.Init.FlashSize = 1;
-  hqspi.Init.ChipSelectHighTime = QSPI_CS_HIGH_TIME_1_CYCLE;
-  hqspi.Init.ClockMode = QSPI_CLOCK_MODE_0;
-  hqspi.Init.FlashID = QSPI_FLASH_ID_1;
-  hqspi.Init.DualFlash = QSPI_DUALFLASH_DISABLE;
-  if (HAL_QSPI_Init(&hqspi) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN QUADSPI_Init 2 */
-
-  /* USER CODE END QUADSPI_Init 2 */
-
-}
-
-/**
-  * @brief RTC Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_RTC_Init(void)
-{
-
-  /* USER CODE BEGIN RTC_Init 0 */
-
-  /* USER CODE END RTC_Init 0 */
-
-  RTC_TimeTypeDef sTime = {0};
-  RTC_DateTypeDef sDate = {0};
-
-  /* USER CODE BEGIN RTC_Init 1 */
-
-  /* USER CODE END RTC_Init 1 */
-
-  /** Initialize RTC Only
-  */
-  hrtc.Instance = RTC;
-  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
-  hrtc.Init.AsynchPrediv = 127;
-  hrtc.Init.SynchPrediv = 255;
-  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
-  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
-  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
-  hrtc.Init.OutPutRemap = RTC_OUTPUT_REMAP_NONE;
-  if (HAL_RTC_Init(&hrtc) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /* USER CODE BEGIN Check_RTC_BKUP */
-
-  /* USER CODE END Check_RTC_BKUP */
-
-  /** Initialize RTC and set the Time and Date
-  */
-  sTime.Hours = 11;
-  sTime.Minutes = 27;
-  sTime.Seconds = 0;
-  sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
-  sTime.StoreOperation = RTC_STOREOPERATION_RESET;
-  if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BIN) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  sDate.WeekDay = RTC_WEEKDAY_WEDNESDAY;
-  sDate.Month = RTC_MONTH_JULY;
-  sDate.Date = 1;
-  sDate.Year = 0;
-
-  if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BIN) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN RTC_Init 2 */
-
-  /* USER CODE END RTC_Init 2 */
-
-}
-
-/**
-  * @brief UART4 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_UART4_Init(void)
-{
-
-  /* USER CODE BEGIN UART4_Init 0 */
-
-  /* USER CODE END UART4_Init 0 */
-
-  /* USER CODE BEGIN UART4_Init 1 */
-
-  /* USER CODE END UART4_Init 1 */
-  huart4.Instance = UART4;
-  huart4.Init.BaudRate = 9600;
-  huart4.Init.WordLength = UART_WORDLENGTH_8B;
-  huart4.Init.StopBits = UART_STOPBITS_1;
-  huart4.Init.Parity = UART_PARITY_NONE;
-  huart4.Init.Mode = UART_MODE_TX_RX;
-  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart4.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart4.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart4.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart4, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart4, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_DisableFifoMode(&huart4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN UART4_Init 2 */
-
-  /* USER CODE END UART4_Init 2 */
-
-}
-
-/**
-  * @brief UART5 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_UART5_Init(void)
-{
-
-  /* USER CODE BEGIN UART5_Init 0 */
-
-  /* USER CODE END UART5_Init 0 */
-
-  /* USER CODE BEGIN UART5_Init 1 */
-
-  /* USER CODE END UART5_Init 1 */
-  huart5.Instance = UART5;
-  huart5.Init.BaudRate = 115200;
-  huart5.Init.WordLength = UART_WORDLENGTH_8B;
-  huart5.Init.StopBits = UART_STOPBITS_1;
-  huart5.Init.Parity = UART_PARITY_NONE;
-  huart5.Init.Mode = UART_MODE_TX_RX;
-  huart5.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  huart5.Init.OverSampling = UART_OVERSAMPLING_16;
-  huart5.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  huart5.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  huart5.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  if (HAL_UART_Init(&huart5) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetTxFifoThreshold(&huart5, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_SetRxFifoThreshold(&huart5, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  if (HAL_UARTEx_EnableFifoMode(&huart5) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN UART5_Init 2 */
-
-  /* USER CODE END UART5_Init 2 */
-
-}
-
-/**
-  * @brief GPIO Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_GPIO_Init(void)
-{
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  /* USER CODE BEGIN MX_GPIO_Init_1 */
-
-  /* USER CODE END MX_GPIO_Init_1 */
-
-  /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOE_CLK_ENABLE();
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOE, GPIO_PIN_3, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, MCU_Pneu_3_Pin|MCU_Pneu_5_1_Pin|MCU_Pneu_5_2_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin : PE3 */
-  GPIO_InitStruct.Pin = GPIO_PIN_3;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PE4 PE5 PE6 PE7
-                           PE8 PE9 PE10 PE11
-                           PE12 PE13 PE14 PE15
-                           PE0 PE1 */
-  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7
-                          |GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11
-                          |GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15
-                          |GPIO_PIN_0|GPIO_PIN_1;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PC13 PC0 PC1 PC2
-                           PC3 PC5 PC6 PC7
-                           PC8 PC9 PC10 PC11 */
-  GPIO_InitStruct.Pin = GPIO_PIN_13|GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2
-                          |GPIO_PIN_3|GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7
-                          |GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PA2 PA3 PA8 PA9
-                           PA10 PA15 */
-  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_8|GPIO_PIN_9
-                          |GPIO_PIN_10|GPIO_PIN_15;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : MCU_Pneu_3_Pin MCU_Pneu_5_1_Pin MCU_Pneu_5_2_Pin */
-  GPIO_InitStruct.Pin = MCU_Pneu_3_Pin|MCU_Pneu_5_1_Pin|MCU_Pneu_5_2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : BUCK_PG_Pin */
-  GPIO_InitStruct.Pin = BUCK_PG_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(BUCK_PG_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : LED_PIN_Pin */
-  GPIO_InitStruct.Pin = LED_PIN_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LED_PIN_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PB0 PB1 PB11 PB12
-                           PB13 PB14 PB15 PB3
-                           PB4 PB6 PB7 PB8
-                           PB9 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_11|GPIO_PIN_12
-                          |GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15|GPIO_PIN_3
-                          |GPIO_PIN_4|GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_8
-                          |GPIO_PIN_9;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PD8 PD9 PD10 PD14
-                           PD15 PD0 PD1 PD2
-                           PD3 PD4 PD5 PD6
-                           PD7 */
-  GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_14
-                          |GPIO_PIN_15|GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2
-                          |GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6
-                          |GPIO_PIN_7;
-  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-  /* USER CODE BEGIN MX_GPIO_Init_2 */
-
-  /* USER CODE END MX_GPIO_Init_2 */
+	/** Initializes the peripherals clock
+	 */
+	PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_UART5
+			| RCC_PERIPHCLK_UART7;
+	PeriphClkInitStruct.PLL2.PLL2M = 2;
+	PeriphClkInitStruct.PLL2.PLL2N = 12;
+	PeriphClkInitStruct.PLL2.PLL2P = 2;
+	PeriphClkInitStruct.PLL2.PLL2Q = 3;
+	PeriphClkInitStruct.PLL2.PLL2R = 2;
+	PeriphClkInitStruct.PLL2.PLL2RGE = RCC_PLL2VCIRANGE_3;
+	PeriphClkInitStruct.PLL2.PLL2VCOSEL = RCC_PLL2VCOMEDIUM;
+	PeriphClkInitStruct.PLL2.PLL2FRACN = 0;
+	PeriphClkInitStruct.Usart234578ClockSelection =
+	RCC_USART234578CLKSOURCE_PLL2;
+	if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK) {
+		Error_Handler();
+	}
 }
 
 /* USER CODE BEGIN 4 */
 
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 //---------------------Interrupt callbak v1--------------------------------
 
-//    if (huart->Instance == UART5) {
-//        // Byte is already in uart_rx_buf[uart_rx_index] (HAL wrote it there)
-//        uart_rx_index++;
-//
-//        if (uart_rx_index >= sizeof(uart_rx_buf)) {
-//            CDC_Transmit_FS(uart_rx_buf, uart_rx_index);
-//            uart_rx_index = 0;
-//        }
-//
-//        // Re-arm for the NEXT byte, every single time
-//        HAL_UART_Receive_IT(&huart5, &uart_rx_buf[uart_rx_index], 1);
-//    }
+	if (huart->Instance == UART5) {
+		// Byte is already in uart_rx_buf[uart_rx_index] (HAL wrote it there)
+		uart5_rx_index++;
+
+		if (uart5_rx_index >= sizeof(uart5_rx_buf)) {
+			CDC_Transmit_FS(uart5_rx_buf, uart5_rx_index);
+			uart5_rx_index = 0;
+		}
+
+		// Re-arm for the NEXT byte, every single time
+		HAL_UART_Receive_IT(&huart5, &uart5_rx_buf[uart5_rx_index], 1);
+	}
 
 //------------------Interrupt callback v2-----------------------
 //	if(huart->Instance == ODRIVE_UART_HANDLE.Instance){
@@ -842,94 +603,85 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 //	}
 
 //---------------------Interrupt callback v3 for display testing
-	void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-	{
-	    if (huart->Instance == UART4) /* <- your Nextion UART instance */
-	    {
-	        uint8_t b = nx_rx_byte;
 
-	        if (nx_pkt_idx == 0 && b != 0x65) {
-	            /* not the start of a touch packet - ignore stray byte and
-	             * keep waiting for 0x65 */
-	        } else {
-	            nx_pkt[nx_pkt_idx++] = b;
-
-	            if (nx_pkt_idx == 7) {
-	                /* full packet assembled: validate the 0xFF 0xFF 0xFF tail */
-	                if (nx_pkt[4] == 0xFF && nx_pkt[5] == 0xFF && nx_pkt[6] == 0xFF) {
-	                    uint8_t component_id = nx_pkt[2];
-	                    uint8_t event = nx_pkt[3];
-
-	                    if (event == 0x00) { /* release only */
-	                        if (component_id == 0) {        /* b0 = LED ON */
-	                            HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_SET);
-	                        } else if (component_id == 1) { /* b1 = LED OFF */
-	                            HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_RESET);
-	                        }
-	                    }
-	                }
-	                nx_pkt_idx = 0; /* ready for next packet */
-	            }
-	        }
-
-	        HAL_UART_Receive_IT(huart, &nx_rx_byte, 1); /* re-arm, always */
-	    }
-	}
+//	    if (huart->Instance == UART4) /* <- your Nextion UART instance */
+//	    {
+//	        uint8_t b = nx_rx_byte;
+//
+//	        if (nx_pkt_idx == 0 && b != 0x65) {
+//	            /* not the start of a touch packet - ignore stray byte and
+//	             * keep waiting for 0x65 */
+//	        } else {
+//	            nx_pkt[nx_pkt_idx++] = b;
+//
+//	            if (nx_pkt_idx == 7) {
+//	                /* full packet assembled: validate the 0xFF 0xFF 0xFF tail */
+//	                if (nx_pkt[4] == 0xFF && nx_pkt[5] == 0xFF && nx_pkt[6] == 0xFF) {
+//	                    uint8_t component_id = nx_pkt[2];
+//	                    uint8_t event = nx_pkt[3];
+//
+//	                    if (event == 0x00) { /* release only */
+//	                        if (component_id == 0) {        /* b0 = LED ON */
+//	                            HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_SET);
+//	                        } else if (component_id == 1) { /* b1 = LED OFF */
+//	                            HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_RESET);
+//	                        }
+//	                    }
+//	                }
+//	                nx_pkt_idx = 0; /* ready for next packet */
+//	            }
+//	        }
+//
+//	        HAL_UART_Receive_IT(huart, &nx_rx_byte, 1); /* re-arm, always */
+//	    }
 
 }
 
-
-uint32_t ODrive_Get_CAN_ID(uint8_t axis_id, uint32_t cmd_id)
-{
-    return ((uint32_t)axis_id << 5) | cmd_id;
+uint32_t ODrive_Get_CAN_ID(uint8_t axis_id, uint32_t cmd_id) {
+	return ((uint32_t) axis_id << 5) | cmd_id;
 }
-
-
 
 /* USER CODE END 4 */
 
- /* MPU Configuration */
+/* MPU Configuration */
 
-void MPU_Config(void)
-{
-  MPU_Region_InitTypeDef MPU_InitStruct = {0};
+void MPU_Config(void) {
+	MPU_Region_InitTypeDef MPU_InitStruct = { 0 };
 
-  /* Disables the MPU */
-  HAL_MPU_Disable();
+	/* Disables the MPU */
+	HAL_MPU_Disable();
 
-  /** Initializes and configures the Region and the memory to be protected
-  */
-  MPU_InitStruct.Enable = MPU_REGION_ENABLE;
-  MPU_InitStruct.Number = MPU_REGION_NUMBER0;
-  MPU_InitStruct.BaseAddress = 0x0;
-  MPU_InitStruct.Size = MPU_REGION_SIZE_4GB;
-  MPU_InitStruct.SubRegionDisable = 0x87;
-  MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
-  MPU_InitStruct.AccessPermission = MPU_REGION_NO_ACCESS;
-  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
-  MPU_InitStruct.IsShareable = MPU_ACCESS_SHAREABLE;
-  MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
-  MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
+	/** Initializes and configures the Region and the memory to be protected
+	 */
+	MPU_InitStruct.Enable = MPU_REGION_ENABLE;
+	MPU_InitStruct.Number = MPU_REGION_NUMBER0;
+	MPU_InitStruct.BaseAddress = 0x0;
+	MPU_InitStruct.Size = MPU_REGION_SIZE_4GB;
+	MPU_InitStruct.SubRegionDisable = 0x87;
+	MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
+	MPU_InitStruct.AccessPermission = MPU_REGION_NO_ACCESS;
+	MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
+	MPU_InitStruct.IsShareable = MPU_ACCESS_SHAREABLE;
+	MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
+	MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
 
-  HAL_MPU_ConfigRegion(&MPU_InitStruct);
-  /* Enables the MPU */
-  HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+	HAL_MPU_ConfigRegion(&MPU_InitStruct);
+	/* Enables the MPU */
+	HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 
 }
 
 /**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
-void Error_Handler(void)
-{
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
-  {
-  }
-  /* USER CODE END Error_Handler_Debug */
+ * @brief  This function is executed in case of error occurrence.
+ * @retval None
+ */
+void Error_Handler(void) {
+	/* USER CODE BEGIN Error_Handler_Debug */
+	/* User can add his own implementation to report the HAL error return state */
+	__disable_irq();
+	while (1) {
+	}
+	/* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
 /**

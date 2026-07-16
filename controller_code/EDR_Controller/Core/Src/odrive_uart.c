@@ -213,3 +213,8 @@ bool odrive_request_state(odrive_uart_t *ctx, int axis, odrive_axis_state_t stat
 {
     return odrive_write(ctx, axis, "requested_state", (float)state);
 }
+
+bool odrive_save_and_reboot(odrive_uart_t *ctx)
+{
+    return send_cmd(ctx, "ss\n");
+}

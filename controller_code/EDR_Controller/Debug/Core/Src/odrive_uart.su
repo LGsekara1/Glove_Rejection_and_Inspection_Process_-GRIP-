@@ -13,3 +13,4 @@
 ../Core/Src/odrive_uart.c:190:6:odrive_check_errors	48	static
 ../Core/Src/odrive_uart.c:201:6:odrive_read_current_state	48	static
 ../Core/Src/odrive_uart.c:212:6:odrive_request_state	24	static
+../Core/Src/odrive_uart.c:217:6:odrive_save_and_reboot	16	static

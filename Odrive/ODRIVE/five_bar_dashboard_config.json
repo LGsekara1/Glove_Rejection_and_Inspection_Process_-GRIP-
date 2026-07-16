@@ -1,0 +1,46 @@
+{
+  "params": {
+    "L0": 300.0,
+    "l1a": 300.0,
+    "l2a": 450.0,
+    "l1b": 300.0,
+    "l2b": 450.0,
+    "elbow1": "up",
+    "elbow2": "down",
+    "fk_branch": "upper"
+  },
+  "axis_cfg": {
+    "0": {
+      "gear_ratio": 1.0,
+      "offset_turns": 0.0,
+      "direction": 1.0
+    },
+    "1": {
+      "gear_ratio": 1.0,
+      "offset_turns": 0.0,
+      "direction": 1.0
+    }
+  },
+  "spi_cfg": {
+    "0": {
+      "cs_gpio": 4,
+      "mode": 257
+    },
+    "1": {
+      "cs_gpio": 3,
+      "mode": 257
+    }
+  },
+  "home_angle_deg": {
+    "0": 222.57888793945312,
+    "1": 64.32117462158203
+  },
+  "traj_cfg": {
+    "max_vel_deg_s": 60.0,
+    "max_accel_deg_s2": 120.0,
+    "control_rate_hz": 100.0
+  },
+  "display_cfg": {
+    "show_workspace": true
+  }
+}

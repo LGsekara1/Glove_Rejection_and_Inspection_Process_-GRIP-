@@ -1,0 +1,11 @@
+../Core/Src/trapezoid.c:5:14:fabs_f	16	static
+../Core/Src/trapezoid.c:6:14:copysign_f	16	static
+../Core/Src/trapezoid.c:10:6:trapezoid_timing	48	static
+../Core/Src/trapezoid.c:37:7:trapezoid_sample	32	static
+../Core/Src/trapezoid.c:58:7:trapezoid_velocity	24	static
+../Core/Src/trapezoid.c:76:13:build_axis_profile	24	static
+../Core/Src/trapezoid.c:84:6:build_sync_profile	32	static
+../Core/Src/trapezoid.c:93:7:sync_profile_pos1	24	static
+../Core/Src/trapezoid.c:101:7:sync_profile_pos2	24	static
+../Core/Src/trapezoid.c:109:7:sync_profile_vel1	24	static
+../Core/Src/trapezoid.c:117:7:sync_profile_vel2	24	static
