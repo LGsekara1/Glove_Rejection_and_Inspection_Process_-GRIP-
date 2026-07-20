@@ -1,0 +1,6 @@
+../Core/Src/cdc_jobs.c:24:13:job_queue_push	16	static
+../Core/Src/cdc_jobs.c:34:6:CdcJobs_Pop	16	static
+../Core/Src/cdc_jobs.c:44:9:CdcJobs_PendingCount	4	static
+../Core/Src/cdc_jobs.c:51:13:parse_line	40	static
+../Core/Src/cdc_jobs.c:67:13:handle_complete_line	56	static
+../Core/Src/cdc_jobs.c:97:6:CdcJobs_OnRxBytes	24	static

@@ -1,3 +1,4 @@
+"./Core/Src/cdc_jobs.o"
 "./Core/Src/dma.o"
 "./Core/Src/gpio.o"
 "./Core/Src/kinematics.o"

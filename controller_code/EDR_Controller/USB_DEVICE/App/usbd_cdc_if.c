@@ -23,6 +23,7 @@
 
 /* USER CODE BEGIN INCLUDE */
 #include "packet_protocol.h"
+#include "cdc_jobs.h"
 
 /* USER CODE END INCLUDE */
 
@@ -270,6 +271,9 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 
   /* Re-arm the endpoint with the application RX buffer to avoid reusing the
      transient callback buffer and to keep the CDC data path stable. */
+
+  CdcJobs_OnRxBytes(Buf, *Len);
+
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, UserRxBufferFS);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
 

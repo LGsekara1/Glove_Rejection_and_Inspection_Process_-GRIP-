@@ -44,6 +44,7 @@
 #include "app_log.h"
 
 #include "sequence.h"
+#include "cdc_jobs.h"
 
 /* USER CODE END Includes */
 
@@ -97,7 +98,7 @@ int16_t sampleX = 0;
 int16_t sampleY = 0;
 
 
-static const sequence_step_t s_pick_place_sequence[] = {
+static sequence_step_t s_pick_place_sequence[] = {
     { .type = STEP_MOVE,  .x = 30.0f, .y = 210.0f },
 
     { .type = STEP_GPIO,  .port = MCU_Pneu_5_2_GPIO_Port, .pin = MCU_Pneu_5_2_Pin, .pin_state = GPIO_PIN_SET },
@@ -240,8 +241,7 @@ int main(void) {
 	if (init_err != MOTION_ERR_NONE) {
 	    cdc_log("Motion_Init failed: err=%d - aborting.\r\n", (int)init_err);
 	} else {
-	    cdc_log("Motion_Init OK.\r\n");
-	    Sequence_Start(s_pick_place_sequence, PICK_PLACE_STEP_COUNT);
+	    cdc_log("Motion_Init OK. Send \"x,y\" over this serial port to queue a pick.\r\n");
 	    HAL_TIM_Base_Start_IT(&htim6);
 	}
 
@@ -258,6 +258,17 @@ int main(void) {
 	        g_control_tick_flag = 0;
 	        Motion_Update();
 	        Sequence_Update();
+
+	        if (!Sequence_IsRunning()) {
+	            pick_job_t job;
+	            if (CdcJobs_Pop(&job)) {
+	                s_pick_place_sequence[0].x = job.x;
+	                s_pick_place_sequence[0].y = job.y;
+	                cdc_log("Dispatching pick-place for (%.2f, %.2f) [%d job(s) still queued]\r\n",
+	                        (double)job.x, (double)job.y, (int)CdcJobs_PendingCount());
+	                Sequence_Start(s_pick_place_sequence, PICK_PLACE_STEP_COUNT);
+	            }
+	        }
 	    }
 	}
 	/* USER CODE END WHILE */
@@ -460,6 +471,7 @@ void Error_Handler(void) {
 	}
 	/* USER CODE END Error_Handler_Debug */
 }
+
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
