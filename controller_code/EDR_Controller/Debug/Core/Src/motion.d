@@ -1,7 +1,7 @@
 Core/Src/motion.o: ../Core/Src/motion.c ../Core/Inc/motion.h \
- ../Core/Inc/app_config.h ../Core/Inc/kinematics.h \
  ../Core/Inc/app_config.h ../Core/Inc/trapezoid.h \
- ../Core/Inc/odrive_link.h \
+ ../Core/Inc/kinematics.h ../Core/Inc/app_config.h \
+ ../Core/Inc/trapezoid.h ../Core/Inc/odrive_link.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h \
  ../Core/Inc/stm32h7xx_hal_conf.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h \
@@ -45,6 +45,7 @@ Core/Src/motion.o: ../Core/Src/motion.c ../Core/Inc/motion.h \
  ../Core/Inc/app_log.h
 ../Core/Inc/motion.h:
 ../Core/Inc/app_config.h:
+../Core/Inc/trapezoid.h:
 ../Core/Inc/kinematics.h:
 ../Core/Inc/app_config.h:
 ../Core/Inc/trapezoid.h:

@@ -82,8 +82,10 @@ motion_err_t Motion_PrepareMove(void)
         return MOTION_ERR_TARGET_UNREACHABLE;
 
     /* 4) build synchronized trapezoidal profile (joint space) */
+    /* Motion_PrepareMove(): update the build_sync_profile call */
     build_sync_profile(t1_target - s_t1_start, t2_target - s_t2_start,
-                        TRAJ_MAX_VEL_DEG_S, TRAJ_MAX_ACCEL_DEG_S2, &s_profile);
+                        TRAJ_MAX_VEL_DEG_S, TRAJ_MAX_ACCEL_DEG_S2,
+                        TRAJ_MOTION_PROFILE, &s_profile);
 
     s_dt = 1.0f / TRAJ_CONTROL_RATE_HZ;
     s_total_steps = (s_profile.T <= 0.0f) ? 0 : (uint32_t)ceilf(s_profile.T / s_dt);

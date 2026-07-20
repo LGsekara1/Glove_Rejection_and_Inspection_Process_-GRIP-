@@ -37,6 +37,12 @@ typedef struct {
 #define HOME_ANGLE_DEG_AXIS1   64.32117462158203f
 
 /* ---------------- Trajectory limits (joint space) -------------- */
+#include "trapezoid.h"   /* for motion_profile_type_t */
+
+/* PROFILE_SCURVE (recommended, matches the dashboard's new default) or
+   PROFILE_TRAPEZOID (legacy, reaches speed slightly quicker but with an
+   instantaneous jerk at the start of each accel/decel ramp). */
+#define TRAJ_MOTION_PROFILE   PROFILE_SCURVE
 #define TRAJ_MAX_VEL_DEG_S     60.0f
 #define TRAJ_MAX_ACCEL_DEG_S2  120.0f
 #define TRAJ_CONTROL_RATE_HZ   100.0f   /* must match TIM6 ISR rate */

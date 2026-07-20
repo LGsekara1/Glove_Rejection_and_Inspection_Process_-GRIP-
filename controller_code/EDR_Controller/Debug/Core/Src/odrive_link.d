@@ -40,7 +40,7 @@ Core/Src/odrive_link.o: ../Core/Src/odrive_link.c \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_ll_usb.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd_ex.h \
- ../Core/Inc/app_config.h
+ ../Core/Inc/app_config.h ../Core/Inc/trapezoid.h
 ../Core/Inc/odrive_link.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
@@ -83,3 +83,4 @@ Core/Src/odrive_link.o: ../Core/Src/odrive_link.c \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_ll_usb.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pcd_ex.h:
 ../Core/Inc/app_config.h:
+../Core/Inc/trapezoid.h:
