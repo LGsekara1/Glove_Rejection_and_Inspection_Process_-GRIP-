@@ -1,4 +1,11 @@
 ../Core/Src/motion.c:10:14:joint_deg_to_turns	40	static
 ../Core/Src/motion.c:16:14:turns_to_joint_deg	40	static
-../Core/Src/motion.c:29:14:Motion_PrepareMove	144	static
-../Core/Src/motion.c:97:6:Motion_StreamTick	48	static
+../Core/Src/motion.c:37:13:queue_push	16	static
+../Core/Src/motion.c:47:13:queue_pop	16	static
+../Core/Src/motion.c:70:19:Motion_Init	136	static
+../Core/Src/motion.c:128:6:Motion_MoveTo	40	static
+../Core/Src/motion.c:148:13:start_next_move_if_idle	48	static
+../Core/Src/motion.c:193:6:Motion_Update	48	static
+../Core/Src/motion.c:230:6:Motion_IsMoving	4	static
+../Core/Src/motion.c:235:9:Motion_QueueDepth	4	static
+../Core/Src/motion.c:240:6:Motion_ClearQueue	4	static

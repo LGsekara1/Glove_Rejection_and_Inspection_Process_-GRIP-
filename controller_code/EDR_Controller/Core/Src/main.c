@@ -43,6 +43,8 @@
 #include "motion.h"
 #include "app_log.h"
 
+#include "sequence.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -65,7 +67,9 @@
 /* USER CODE BEGIN PV */
 
 volatile uint8_t g_control_tick_flag = 0;
-static bool s_move_active = false;
+static bool s_was_moving = false;
+
+
 
 uint8_t buffer[1024];
 char msg[100];
@@ -91,6 +95,22 @@ uint32_t lastSendTick = 0;
 const uint32_t SEND_INTERVAL_MS = 500; /* send a sample packet every 500ms */
 int16_t sampleX = 0;
 int16_t sampleY = 0;
+
+
+static const sequence_step_t s_pick_place_sequence[] = {
+    { .type = STEP_MOVE,  .x = 30.0f, .y = 210.0f },
+
+    { .type = STEP_GPIO,  .port = MCU_Pneu_5_2_GPIO_Port, .pin = MCU_Pneu_5_2_Pin, .pin_state = GPIO_PIN_SET },
+    { .type = STEP_DELAY, .delay_ms = 1000 },
+    { .type = STEP_GPIO,  .port = MCU_Pneu_3_GPIO_Port,   .pin = MCU_Pneu_3_Pin,   .pin_state = GPIO_PIN_SET },
+    { .type = STEP_DELAY, .delay_ms = 1000 },
+    { .type = STEP_GPIO,  .port = MCU_Pneu_5_2_GPIO_Port, .pin = MCU_Pneu_5_2_Pin, .pin_state = GPIO_PIN_RESET },
+	{ .type = STEP_DELAY, .delay_ms = 1000 },
+    { .type = STEP_MOVE,  .x = 325.0f, .y = 560.0f }, /* EDIT to the real drop location */
+
+    { .type = STEP_GPIO,  .port = MCU_Pneu_3_GPIO_Port,   .pin = MCU_Pneu_3_Pin,   .pin_state = GPIO_PIN_RESET },
+};
+#define PICK_PLACE_STEP_COUNT (sizeof(s_pick_place_sequence) / sizeof(s_pick_place_sequence[0]))
 
 //FDCAN_FilterTypeDef filter;
 //FDCAN_TxHeaderTypeDef txHeader;
@@ -143,6 +163,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 		g_control_tick_flag = 1;
 	}
 }
+
 
 //--------for display--------------------
 //static void nx_send(UART_HandleTypeDef *huart, const char *cmd)
@@ -204,6 +225,7 @@ int main(void) {
 	/* USER CODE BEGIN 2 */
 
 	//Initial startup procedure
+
 	HAL_Delay(6000);
 	HAL_GPIO_WritePin(Relay_EN_GPIO_Port, Relay_EN_Pin, GPIO_PIN_SET);
 	HAL_Delay(4000);
@@ -212,276 +234,31 @@ int main(void) {
 	HAL_GPIO_WritePin(ODrive_NRST_GPIO_Port, ODrive_NRST_Pin, GPIO_PIN_SET);
 
 	ODriveLink_Init(&huart5);
-	HAL_Delay(500); /* let USB CDC enumerate before first log */
+	HAL_Delay(500);
 
-	cdc_log("Preparing move to (%.2f, %.2f) mm...\r\n", (double) TARGET_X_MM,
-			(double) TARGET_Y_MM);
-	motion_err_t err = Motion_PrepareMove();
-	if (err != MOTION_ERR_NONE) {
-		cdc_log("Motion_PrepareMove failed: err=%d - aborting.\r\n", (int) err);
+	motion_init_err_t init_err = Motion_Init();
+	if (init_err != MOTION_ERR_NONE) {
+	    cdc_log("Motion_Init failed: err=%d - aborting.\r\n", (int)init_err);
 	} else {
-		cdc_log("Profile built. Starting 100 Hz streaming.\r\n");
-		HAL_TIM_Base_Start_IT(&htim6);
-		s_move_active = true;
+	    cdc_log("Motion_Init OK.\r\n");
+	    Sequence_Start(s_pick_place_sequence, PICK_PLACE_STEP_COUNT);
+	    HAL_TIM_Base_Start_IT(&htim6);
 	}
 
-//Alterntative for interrup **Not checked with hardware
-//  odrive_uart_init(&odrv, &huart5);
 
-//  rcc_cr_snapshot = RCC->CR;
-//
-//  // HSE ready flag
-//  hse_ready = __HAL_RCC_GET_FLAG(RCC_FLAG_HSERDY);
-//
-//  // PLL source check (very important on your config)
-//  pll_source = __HAL_RCC_GET_PLL_OSCSOURCE();
-//
-//  // actual system clock frequency
-//  sysclk_hz = HAL_RCC_GetSysClockFreq();
-
-////
-////------------starting  fdcan2-----------------------------------
-//HAL_FDCAN_Start(&hfdcan2);
-////
-////
-////--------Coding RX interrupt-----------
-//HAL_FDCAN_ActivateNotification(
-//          &hfdcan2,
-//          FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
-//          0);
-
-//  //-------Debugging with status checks for CAN init
-//  HAL_StatusTypeDef ret;
-//
-//  ret = HAL_FDCAN_ConfigFilter(&hfdcan1, &filter);
-//  sprintf((char*)buffer,"Filter = %d\r\n",ret);
-//  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//
-//  ret = HAL_FDCAN_Start(&hfdcan1);
-//  sprintf((char*)buffer,"Filter = %d\r\n",ret);
-//  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//
-//  ret = HAL_FDCAN_ActivateNotification(
-//		  &hfdcan1,
-//		  FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
-//		  0);
-//  sprintf((char*)buffer, "Notification = %d\r\n",ret);
-//  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-
-//----------------UART config for Odrive---------------
-//  HAL_StatusTypeDef status = HAL_UART_Transmit(&huart5, (uint8_t*)en, strlen(en), HAL_MAX_DELAY);
-//	 if(status != HAL_OK){
-//
-//	 }
-//  HAL_Delay(2000);
-//  sprintf((char*)buffer,"Starting!");
-//  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//
-//
-////  HAL_UART_Receive_IT(&huart5, uart_rx_buf, 1);
-//  HAL_UART_Receive_IT(&huart5,uart5_rx_buf,1);
-////
-//  HAL_StatusTypeDef uart_status = HAL_UART_Transmit(&huart5, (uint8_t*)fullCallib, strlen(fullCallib), 1000);
-//  HAL_Delay(10000);
-//  HAL_UART_Transmit(&huart5, (uint8_t*)saveConfig, strlen(saveConfig), 1000);
-//  HAL_Delay(5000);
-	// Confirm the link is alive at all: force page 0
-//  HAL_UART_Receive_IT(&huart4, &nx_rx_byte, 1); /* arm first byte */
-//  nx_send(&huart4, "page 0");
-//      HAL_Delay(100);
-
-//  Packet_Init();
-
-//	scara_app_init();
 
 	/* USER CODE END 2 */
 
 	/* Infinite loop */
 	/* USER CODE BEGIN WHILE */
-	while (1) {
+	while (1)
+	{
 
-		if (g_control_tick_flag) {
-			g_control_tick_flag = 0;
-			if (s_move_active) {
-				bool still_running = Motion_StreamTick();
-				if (!still_running) {
-					s_move_active = false;
-					HAL_TIM_Base_Stop_IT(&htim6);
-					cdc_log("Move complete.\r\n");
-					HAL_Delay(5000);
-					HAL_GPIO_WritePin(MCU_Pneu_5_2_GPIO_Port, MCU_Pneu_5_2_Pin,
-							GPIO_PIN_SET);
-					HAL_Delay(2000);
-					HAL_GPIO_WritePin(MCU_Pneu_3_GPIO_Port, MCU_Pneu_3_Pin,
-							GPIO_PIN_SET);
-					HAL_Delay(1000);
-					HAL_GPIO_WritePin(MCU_Pneu_5_2_GPIO_Port, MCU_Pneu_5_2_Pin,
-							GPIO_PIN_RESET);
-					HAL_Delay(5000);
-					HAL_GPIO_WritePin(MCU_Pneu_3_GPIO_Port, MCU_Pneu_3_Pin,
-							GPIO_PIN_RESET);
-					HAL_Delay(10000);
-				}
-			}
-		}
-
-//----GPIO toggle check-------------------
-//
-//	  HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_SET);
-//	  HAL_Delay(1000);
-//	  HAL_GPIO_WritePin(LED_PIN_GPIO_Port, LED_PIN_Pin, GPIO_PIN_RESET);
-//	  HAL_Delay(1000);
-
-		/* Read time first */
-//	      HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
-//
-//	      /* Then read date (required to unlock the shadow registers) */
-//	      HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
-//
-//	      sprintf(msg,
-//	              "%02d:%02d:%02d\r\n",
-//	              sTime.Hours,
-//	              sTime.Minutes,
-//	              sTime.Seconds);
-//
-////	      CDC_Transmit_FS((uint8_t*)msg,
-////	                          strlen(msg));
-//
-//	      HAL_Delay(1000);
-//-----HSE check------------------------
-//	  if(__HAL_RCC_GET_FLAG(RCC_FLAG_HSERDY))
-//	  	  	  HAL_GPIO_WritePin(GPIOC,GPIO_PIN_4, 1);
-//	  else
-//		  HAL_GPIO_WritePin(GPIOC,GPIO_PIN_4, 0);
-//	 rcc_cr_snapshot = RCC->CR;
-//	 hse_ready = __HAL_RCC_GET_FLAG(RCC_FLAG_HSERDY);
-//	 sysclk_hz = HAL_RCC_GetSysClockFreq();
-//
-//	 HAL_Delay(500);
-//CDC check
-//	  sprintf((char*)buffer,"CDC up and running!\n");
-//	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//	  HAL_Delay(1000);
-//---------------CAN---------------------------------
-//   for (int i=0; i<8; i++)
-//   {
-//	txData[i] = indx++;
-//   }
-//
-//   HAL_StatusTypeDef status;
-//   status = HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &txHeader, txData);
-//   if (status!= HAL_OK)
-//   {
-//	Error_Handler();
-//   }
-//-----Clear errors and read bus voltage
-//	  uint8_t txData[8] = {0};
-//	  uint32_t data =0 ;
-//	  memcpy(txData,&data,sizeof(data));
-//	  txHeader.Identifier = ODrive_Get_CAN_ID(0, CMD_CLEAR_ERRORS);
-//	  txHeader.DataLength = FDCAN_DLC_BYTES_0;
-//	  HAL_StatusTypeDef ret = HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &txHeader, txData);
-//	  HAL_Delay(2000);
-//	  txHeader.Identifier = ODrive_Get_CAN_ID(0, CMD_GET_BUS_VOLTAGE_AND_CURRENT);
-//	  txHeader.TxFrameType = FDCAN_REMOTE_FRAME;
-//	  txHeader.DataLength = FDCAN_DLC_BYTES_8;   // requested length
-//	  HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &txHeader, txData);
-//	  FDCAN_ProtocolStatusTypeDef status;
-//	  HAL_FDCAN_GetProtocolStatus(&hfdcan2, &status);
-//	  sprintf((char*)buffer, "LEC:%lu DLEC:%lu EP:%d BO:%d\r\n",
-//	          status.LastErrorCode, status.DataLastErrorCode,
-//	          status.ErrorPassive, status.BusOff);
-//	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//	  HAL_Delay(2000);
-//--closed loop motor control with FDCAN
-//	  uint32_t state = 3;
-//	  memcpy(txData, &state, sizeof(state));
-//	  txHeader.Identifier = ODrive_Get_CAN_ID(0, CMD_SET_AXIS_REQUESTED_STATE);
-//	  txHeader.DataLength = FDCAN_DLC_BYTES_4;
-//	  HAL_FDCAN_AddMessageToTxFifoQ(
-//	          &hfdcan2,
-//	          &txHeader,
-//	          txData
-//	  );
-//	  HAL_Delay(6000);
-//	  uint8_t data[8] = {0};
-//
-//	  uint32_t state = 8;   // CLOSED_LOOP_CONTROL
-//
-//	  memcpy(data, &state, 4);
-//
-//	  ODrive_CAN_Send(
-//	      1,                         // axis_id
-//	      CMD_SET_AXIS_NODE_ID,
-//	      data,
-//	      8
-//	  );
-//   HAL_Delay (1000);
-//------------------Odrive testing with UART -----------------------------
-//	  HAL_Delay(500);
-//	  // Diagnostic feedback
-//	  if(uart_status == HAL_OK) {
-//		  sprintf((char*)buffer,"UART TX OK\r\n");
-//	  } else if(uart_status == HAL_TIMEOUT) {
-//		  sprintf((char*)buffer,"UART TX TIMEOUT\r\n");
-//	  } else if(uart_status == HAL_BUSY) {
-//		  sprintf((char*)buffer,"UART TX BUSY\r\n");
-//	  } else {
-//		  sprintf((char*)buffer,"UART TX ERROR: %d\r\n", uart_status);
-//	  }
-//	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//	  HAL_Delay(500);
-//-------------Reading bus voltage from Odrive
-//	  HAL_UART_Transmit(&huart5, (uint8_t*)read_voltage, strlen(read_voltage), 1000);
-//	  HAL_Delay(4000);
-//
-//
-//
-//	  float vbus;
-//	  if (odrive_read_property_f(&odrv, "vbus_voltage", &vbus) == HAL_OK) {
-//	      sprintf((char*)buffer, "ODrive vbus = %.2f V\r\n", vbus);
-//	  } else {
-//	      sprintf((char*)buffer, "ODrive UART read failed (check wiring/baud)\r\n");
-//	  }
-//	  CDC_Transmit_FS(buffer, strlen((char*)buffer));
-//	  HAL_UART_Transmit(&huart5, (uint8_t*)closedLoop0, strlen(closedLoop0), 1000);
-//	  HAL_UART_Transmit(&huart5, (uint8_t*)closedLoop1, strlen(closedLoop1), 1000);
-//--------------------------------------pNEUMATIC activation---------------------------------------
-//	  HAL_GPIO_WritePin(MCU_Pneu_5_2_GPIO_Port, MCU_Pneu_5_2_Pin,GPIO_PIN_SET);
-//	  HAL_Delay(2000);
-//	  HAL_GPIO_WritePin(MCU_Pneu_3_GPIO_Port, MCU_Pneu_3_Pin, GPIO_PIN_SET);
-//	  HAL_Delay(1000);
-//	  HAL_GPIO_WritePin(MCU_Pneu_5_2_GPIO_Port, MCU_Pneu_5_2_Pin,GPIO_PIN_RESET);
-//	  HAL_Delay(2000);
-//	  HAL_GPIO_WritePin(MCU_Pneu_3_GPIO_Port, MCU_Pneu_3_Pin, GPIO_PIN_RESET);
-//	  HAL_Delay(10000);
-		//non-blocking, call every loop iteration
-//		scara_app_poll();
-//-----------Display test
-//	  nx_send(&huart4, "t0.txt=\"GPIO HIGH\"");
-//	         HAL_Delay(500);
-//	         nx_send(&huart4, "t0.txt=\"GPIO LOW\"");
-//	         HAL_Delay(500);
-//------------Vision controller protocol-----------------
-//	  if ((HAL_GetTick() - lastSendTick) >= SEND_INTERVAL_MS)
-//	      {
-//	          lastSendTick = HAL_GetTick();
-//
-//	          /* Replace with real data, e.g. current five-bar end-effector
-//	           * coordinates from your kinematics module */
-//	          sampleX += 10;
-//	          sampleY += 5;
-//
-//	          uint8_t status = Packet_SendData(sampleX, sampleY, HAL_GetTick());
-//
-//	          if (status != USBD_OK)
-//	          {
-//	              char msg[64];
-//	              sprintf(msg, "[TX FAIL] CDC busy or not connected (status=%d)\r\n", status);
-//	              CDC_Transmit_FS((uint8_t *)msg, (uint16_t)strlen(msg));
-//	          }
-//
-//	      }
+	    if (g_control_tick_flag) {
+	        g_control_tick_flag = 0;
+	        Motion_Update();
+	        Sequence_Update();
+	    }
 	}
 	/* USER CODE END WHILE */
 

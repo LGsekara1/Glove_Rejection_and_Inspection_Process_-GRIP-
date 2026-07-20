@@ -36,9 +36,14 @@
     "1": 64.32117462158203
   },
   "traj_cfg": {
-    "max_vel_deg_s": 60.0,
-    "max_accel_deg_s2": 120.0,
-    "control_rate_hz": 100.0
+    "max_vel_deg_s": 300.0,
+    "max_accel_deg_s2": 600.0,
+    "control_rate_hz": 2000.0,
+    "motion_profile": "trapezoid",
+    "input_filter_bandwidth_hz": 1000.0,
+    "cart_vmax_mm_s": 400.0,
+    "cart_amax_mm_s2": 2000.0,
+    "cart_lateral_amax_mm_s2": 1000.0
   },
   "display_cfg": {
     "show_workspace": true

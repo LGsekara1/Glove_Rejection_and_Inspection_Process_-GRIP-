@@ -88,6 +88,25 @@ Motion planning:
   steps to average the jitter out. Streaming from one dedicated thread with
   deadline-based (not sleep-after-work) timing removes that overhead and
   keeps the motor moving continuously until the actual final waypoint.
+
+  v22 change: the ODrive is now put into INPUT_MODE_POS_FILTER (was
+  INPUT_MODE_PASSTHROUGH) whenever closed-loop control is (re)enabled.
+  Under PASSTHROUGH, every ~100Hz input_pos write from the software
+  trapezoid was treated by the firmware as a brand-new step target,
+  including whatever jitter the Python/USB round-trip added to that
+  write's timing - that re-excited the firmware's position PD loop on
+  every tick and was the main source of the point-to-point oscillation.
+  POS_FILTER instead runs a critically-damped 2nd-order filter on
+  input_pos inside the firmware's own 8kHz loop, so the incoming stream
+  of setpoints gets smoothed in firmware instead of fought in software.
+  The filter's responsiveness is set by
+  controller.config.input_filter_bandwidth (Hz), exposed on the Config
+  tab as "Input filter bandwidth" - lower is smoother/more damped,
+  higher is snappier but closer to the old behavior. This is a
+  config-level change only; the software trapezoid/S-curve planner and
+  the streaming thread are unchanged, so it's a good first experiment to
+  run before anything bigger (e.g. switching to velocity control with a
+  Jacobian-based Cartesian tracker).
 """
 
 import math
@@ -123,6 +142,17 @@ AXIS_STATE_CLOSED_LOOP_CONTROL = 8
 
 CONTROL_MODE_POSITION_CONTROL = 3
 INPUT_MODE_PASSTHROUGH = 1
+# POS_FILTER runs a critically-damped 2nd-order low-pass filter on
+# controller.input_pos INSIDE the ODrive's own 8kHz control loop, instead of
+# treating every incoming input_pos write as a fresh step target the way
+# PASSTHROUGH does. Since the software trapezoid streams setpoints at only
+# ~100Hz (subject to USB/Python scheduling jitter), PASSTHROUGH mode was
+# turning every one of those writes into a small step input that re-excited
+# the firmware position loop - that's the main source of the oscillation.
+# POS_FILTER absorbs that jitter in firmware instead of fighting it in
+# software. Bandwidth is set via controller.config.input_filter_bandwidth
+# (Hz) - lower = smoother/more damped, higher = snappier/more responsive.
+INPUT_MODE_POS_FILTER = 3
 
 # The joint angle (deg, measured from the +X axis per this script's theta
 # convention) that the Calibration tab's "Sync Now" button assigns to
@@ -967,6 +997,25 @@ class FiveBarDashboard:
             # slightly quicker but with an instantaneous jerk at the start
             # of each accel/decel ramp).
             "motion_profile": "scurve",
+            # Firmware-side input filter bandwidth (Hz) used when in
+            # INPUT_MODE_POS_FILTER. Lower = smoother/more damped (better
+            # rejection of the software loop's setpoint jitter), higher =
+            # snappier tracking of the commanded trajectory. Start low
+            # (2-4 Hz) and raise it if the arm feels sluggish/laggy behind
+            # the commanded path; lower it if it's still oscillating.
+            "input_filter_bandwidth_hz": 4.0,
+            # Cartesian (end-effector, mm/mm-s^2) motion limits used by the
+            # IK tab's "Move" button and the Path Planning tab. Both of
+            # those now plan the move directly in Cartesian space (straight
+            # line / straight-line-segment polyline through waypoints) and
+            # play it back through the same curvature-limited engine as the
+            # Draw tab's "Curvature-Limited Path Timing" mode, instead of
+            # interpolating joint angles - joint-space interpolation is
+            # what was bowing straight-line moves into curves, since the
+            # five-bar's joint-to-Cartesian mapping is nonlinear.
+            "cart_vmax_mm_s": 80.0,
+            "cart_amax_mm_s2": 400.0,
+            "cart_lateral_amax_mm_s2": 200.0,
         }
 
         # Visualization display toggles.
@@ -1037,12 +1086,22 @@ class FiveBarDashboard:
     def build_ui(self):
         ui.page_title("Five-Bar Linkage Dashboard")
 
+        # Global keyboard E-stop: fires on Escape regardless of which
+        # element has focus (ignore=[] overrides NiceGUI's default of
+        # skipping key events while an input/select/button/textarea is
+        # focused - that default would be dangerous here, since the most
+        # likely moment to need an E-stop is while a number field like a
+        # jog input is focused). repeat presses while held are filtered
+        # out in the handler so holding Escape doesn't spam the log.
+        ui.keyboard(on_key=self._on_global_keydown, ignore=[])
+
         with ui.row().classes("w-full items-center justify-between p-2"):
             self.connect_btn = ui.button("Connect to ODrive", on_click=self.connect_odrive)
             self.status_label = ui.label("Not connected").classes("text-red-600 font-bold")
             with ui.row().classes("items-center gap-2"):
                 ui.button("Stop Trajectory", on_click=self.abort_motion, color="orange")
                 ui.button("EMERGENCY STOP", on_click=self.emergency_stop, color="red").classes("font-bold")
+                ui.label("(or press Esc)").classes("text-xs text-gray-500")
                 ui.button("Resume After E-Stop", on_click=self.resume_from_estop, color="green")
 
         with ui.row().classes("w-full no-wrap"):
@@ -1257,20 +1316,24 @@ class FiveBarDashboard:
 
         ui.label("Motion mode").classes("font-bold")
         ui.label(
-            "Waypoint Hermite Chain: the sketch is reduced to a handful of "
-            "waypoints, each given a through-velocity, and blended with "
-            "cubic Hermite curves (same engine Path Planning/Custom "
-            "Trajectory use). Curvature-Limited Path Timing: the sketch is "
-            "kept as one dense geometric path with NO waypoint velocities "
-            "at all - instead a separate speed-vs-distance law is computed "
-            "from real physical limits (a speed cap, an accel/decel cap, "
-            "and a cornering-speed cap derived from how tightly the path "
-            "actually curves). Switch modes and re-run the same sketch to "
-            "compare them directly."
+            "Curvature-Limited Path Timing (recommended): the sketch is "
+            "kept as one dense geometric path and followed exactly - "
+            "position is interpolated directly in (X,Y) space and only "
+            "converted to joint angles at the very last step, so the arm "
+            "traces the drawn line/shape precisely. A speed-vs-distance "
+            "law (speed cap, accel/decel cap, cornering-speed cap from how "
+            "tightly the path curves) shapes how fast it moves along that "
+            "fixed geometric path. Waypoint Hermite Chain (legacy): the "
+            "sketch is reduced to a handful of waypoints and blended by "
+            "interpolating JOINT ANGLES between them - because the five-"
+            "bar's joint-to-Cartesian mapping is nonlinear, this tends to "
+            "bow straight lines/sketched shapes into curves. Kept only for "
+            "comparison; use Curvature-Limited for anything where tracing "
+            "the actual drawn/straight path matters."
         ).classes("text-xs text-gray-500")
         self.draw_mode_toggle = ui.toggle(
-            {"hermite": "Waypoint Hermite Chain", "curvature": "Curvature-Limited Path Timing"},
-            value="hermite", on_change=self._on_draw_mode_change,
+            {"curvature": "Curvature-Limited Path Timing (recommended)", "hermite": "Waypoint Hermite Chain (legacy)"},
+            value="curvature", on_change=self._on_draw_mode_change,
         )
 
         with ui.column().classes("w-full") as self.draw_hermite_controls:
@@ -1325,7 +1388,7 @@ class FiveBarDashboard:
             self.draw_profile_label = ui.label("No sketch yet.").classes("text-xs text-gray-600")
             self.draw_profile_svg = ui.html("")
 
-        self.draw_curvature_controls.visible = False
+        self.draw_hermite_controls.visible = False
 
         self.draw_image = ui.interactive_image(
             source=self._draw_bg_data_uri(),
@@ -1574,6 +1637,76 @@ class FiveBarDashboard:
         self.log("Running drawn path [Waypoint Hermite Chain]: {} waypoint(s) at ~{:.1f} mm/s "
                   "target speed...".format(len(self._drawn_path_mm), speed))
         await self._launch_motion_task(self._stream_custom_trajectory(segments))
+
+    def _find_unreachable_along_path(self, points, params, samples_per_segment=8):
+        """
+        Densely samples along each straight segment of a Cartesian points
+        list (not just the explicit points themselves) and checks IK
+        reachability at every sample. A straight line between two
+        reachable points can still pass outside the arm's reachable
+        workspace partway through - the five-bar's workspace boundary
+        isn't a simple shape - so checking only the endpoints (which is
+        all the old joint-space planner effectively did, since it IK'd
+        each waypoint but never checked what happens between them) can
+        miss a real failure until the arm is already mid-move. Returns
+        None if the whole path is reachable, otherwise a message
+        describing where it first fails.
+        """
+        n = len(points)
+        for i in range(n - 1):
+            x0, y0 = points[i]
+            x1, y1 = points[i + 1]
+            for k in range(samples_per_segment + 1):
+                u = k / samples_per_segment
+                x = x0 + u * (x1 - x0)
+                y = y0 + u * (y1 - y0)
+                try:
+                    inverse_kinematics(x, y, params)
+                except Exception as e:
+                    return ("unreachable between waypoint {} and waypoint {} "
+                            "(near X={:.1f}, Y={:.1f}): {}".format(i, i + 1, x, y, e))
+        return None
+
+    async def _run_cartesian_points_move(self, points, vmax, amax, lat_amax, waypoints_viz=None, log_label="Move"):
+        """
+        Generic Cartesian path runner shared by the IK tab's straight-line
+        Move, the Path Planning tab, and the Draw tab's Curvature-Limited
+        mode. `points` is a list of (x, y) mm points in end-effector space,
+        points[0] normally being the current position. Playback (in
+        _stream_curvature_path_blocking) linearly interpolates (x, y)
+        between consecutive points at every control-loop tick and only
+        THEN converts to joint angles via IK - so the Cartesian path is
+        always geometrically exact (a true straight line for 2 points, a
+        true straight-line-segment polyline for more), independent of the
+        speed profile. Only the timing (how fast to move along it, with
+        cornering slow-down at interior points) is planned/approximate.
+        """
+        if len(points) < 2:
+            self.log("{}: need at least 2 points (current pose + target), nothing to do.".format(log_label))
+            return
+        params = self._current_ik_params()
+        bad = self._find_unreachable_along_path(points, params)
+        if bad is not None:
+            msg = "{} aborted before moving: path is {}.".format(log_label, bad)
+            self.log(msg)
+            ui.notify(msg, type="negative")
+            return
+        s_list, v_list = plan_curvature_limited_speed(points, vmax, amax, lat_amax)
+        v_list, safety_ratio = self._clamp_cartesian_plan_to_joint_limits(points, v_list)
+        if safety_ratio > 1.0:
+            self.log("WARNING: {} speed plan scaled down {:.0f}% to stay within the Config tab's "
+                      "joint velocity limit (a Jacobian near-singularity was the binding constraint "
+                      "somewhere along the path).".format(log_label, (safety_ratio - 1.0) * 100))
+        T_list, accels = integrate_path_timing(s_list, v_list)
+
+        self.planned_path = points
+        self.waypoints_viz = waypoints_viz if waypoints_viz is not None else points[1:]
+        self.velocity_viz = []
+
+        self.log("{}: {:.1f} mm over {:.2f}s (peak {:.1f} mm/s), straight-line Cartesian path...".format(
+            log_label, s_list[-1], T_list[-1], max(v_list) if v_list else 0.0))
+        await self._launch_motion_task(
+            self._stream_curvature_path(points, s_list, T_list, v_list, accels))
 
     async def _run_drawn_path_curvature(self):
         try:
@@ -2188,6 +2321,39 @@ class FiveBarDashboard:
         self.cfg_control_rate = ui.number(label="Control rate (Hz)", value=self.traj_cfg["control_rate_hz"])
 
         ui.label(
+            "Input filter bandwidth (Hz) - firmware-side smoothing of "
+            "incoming position setpoints (INPUT_MODE_POS_FILTER). This is "
+            "what actually damps out the point-to-point jerkiness/ringing: "
+            "instead of the ODrive treating every ~100Hz software setpoint "
+            "write as a fresh step target, it runs its own critically-"
+            "damped filter toward the moving target at 8kHz. Lower = "
+            "smoother but laggier tracking; higher = snappier but closer "
+            "to the old jerky behavior. Try 2-5 Hz first."
+        ).classes("text-xs text-gray-500")
+        with ui.row().classes("w-full items-center"):
+            self.cfg_input_filter_bw = ui.number(
+                label="Input filter bandwidth (Hz)",
+                value=self.traj_cfg["input_filter_bandwidth_hz"], min=0.1, step=0.5).classes("flex-1")
+            ui.button("Apply Bandwidth Now", on_click=self.apply_input_filter_bandwidth_live).classes("flex-1")
+
+        ui.label(
+            "Cartesian move limits (IK tab Move + Path Planning tab) - these "
+            "moves now travel in a straight line / straight-line-segment "
+            "path in end-effector (X,Y) space rather than interpolating "
+            "joint angles, so the arm actually follows the line instead of "
+            "bowing off it. Same physical meaning as the Draw tab's "
+            "curvature-mode sliders, just a separate set of values."
+        ).classes("text-xs text-gray-500")
+        self.cfg_cart_vmax = ui.number(
+            label="Max Cartesian speed (mm/s)", value=self.traj_cfg["cart_vmax_mm_s"], min=1.0)
+        self.cfg_cart_amax = ui.number(
+            label="Max Cartesian tangential accel (mm/s^2)",
+            value=self.traj_cfg["cart_amax_mm_s2"], min=1.0)
+        self.cfg_cart_lat_amax = ui.number(
+            label="Max Cartesian cornering (lateral) accel (mm/s^2)",
+            value=self.traj_cfg["cart_lateral_amax_mm_s2"], min=1.0)
+
+        ui.label(
             "Motion profile - how acceleration is applied on point-to-point "
             "moves (Joint/IK tabs). S-Curve ramps acceleration up and down "
             "smoothly, which avoids the sharp jerk that tends to excite "
@@ -2324,6 +2490,10 @@ class FiveBarDashboard:
         self.cfg_max_vel.value = self.traj_cfg["max_vel_deg_s"]
         self.cfg_max_accel.value = self.traj_cfg["max_accel_deg_s2"]
         self.cfg_control_rate.value = self.traj_cfg["control_rate_hz"]
+        self.cfg_input_filter_bw.value = self.traj_cfg.get("input_filter_bandwidth_hz", 4.0)
+        self.cfg_cart_vmax.value = self.traj_cfg.get("cart_vmax_mm_s", 80.0)
+        self.cfg_cart_amax.value = self.traj_cfg.get("cart_amax_mm_s2", 400.0)
+        self.cfg_cart_lat_amax.value = self.traj_cfg.get("cart_lateral_amax_mm_s2", 200.0)
         self.cfg_motion_profile.value = self.traj_cfg.get("motion_profile", "scurve")
         for msg in self._startup_messages:
             self.log(msg)
@@ -2940,11 +3110,13 @@ class FiveBarDashboard:
             self.log("Could not read current position, aborting move: {}".format(e))
             return
 
-        self.planned_path = self._sample_path_for_viz([(t1_start, t2_start), (t1_target, t2_target)])
-        self.waypoints_viz = [(x, y)]
-        self.velocity_viz = []
-
-        await self._launch_motion_task(self._stream_joint_trajectory(t1_start, t2_start, t1_target, t2_target))
+        cur_xy = self._current_ee_xy_estimate(t1_start, t2_start)
+        points = [cur_xy, (x, y)]
+        vmax = max(1.0, float(self.traj_cfg.get("cart_vmax_mm_s", 80.0)))
+        amax = max(1.0, float(self.traj_cfg.get("cart_amax_mm_s2", 400.0)))
+        lat_amax = max(1.0, float(self.traj_cfg.get("cart_lateral_amax_mm_s2", 200.0)))
+        await self._run_cartesian_points_move(
+            points, vmax, amax, lat_amax, waypoints_viz=[(x, y)], log_label="IK move")
 
     # ------------------------------------------------------------------
     # Forward kinematics actions
@@ -3053,18 +3225,31 @@ class FiveBarDashboard:
             t1_cur, t2_cur = inverse_kinematics(
                 self.waypoints[0]["x"], self.waypoints[0]["y"], self._current_ik_params())
 
+        cur_xy = self._current_ee_xy_estimate(t1_cur, t2_cur)
+        points = [cur_xy] + [(wp["x"], wp["y"]) for wp in self.waypoints]
+        params = self._current_ik_params()
+        bad = self._find_unreachable_along_path(points, params)
+        if bad is not None:
+            msg = "Preview: path is {}.".format(bad)
+            self.log(msg)
+            ui.notify(msg, type="negative")
+            return
+        vmax = max(1.0, float(self.traj_cfg.get("cart_vmax_mm_s", 80.0)))
+        amax = max(1.0, float(self.traj_cfg.get("cart_amax_mm_s2", 400.0)))
+        lat_amax = max(1.0, float(self.traj_cfg.get("cart_lateral_amax_mm_s2", 200.0)))
         try:
-            segments = self._build_path_planning_segments(t1_cur, t2_cur)
+            s_list, v_list = plan_curvature_limited_speed(points, vmax, amax, lat_amax)
+            v_list, _ = self._clamp_cartesian_plan_to_joint_limits(points, v_list)
         except Exception as e:
             ui.notify("Path error: {}".format(e), type="negative")
             return
 
-        self.planned_path = self._sample_custom_segments_for_viz(segments)
+        self.planned_path = points
         self.waypoints_viz = [(wp["x"], wp["y"]) for wp in self.waypoints]
         self.velocity_viz = []
         self.viz.set_content(self.render_svg(None, None, None))
-        self.log("Path preview updated ({} waypoint(s), one continuous glide - "
-                  "not stopping at interior waypoints).".format(len(self.waypoints)))
+        self.log("Path preview updated ({} waypoint(s), straight-line Cartesian polyline through "
+                  "each).".format(len(self.waypoints)))
 
     async def run_path(self):
         if not await self.require_closed_loop():
@@ -3079,20 +3264,15 @@ class FiveBarDashboard:
             self.log("Could not read current position, aborting path: {}".format(e))
             return
 
-        try:
-            segments = self._build_path_planning_segments(t1_cur, t2_cur)
-        except Exception as e:
-            self.log("Path planning error: {}".format(e))
-            ui.notify("Path planning error: {}".format(e), type="negative")
-            return
-
-        self.planned_path = self._sample_custom_segments_for_viz(segments)
-        self.waypoints_viz = [(wp["x"], wp["y"]) for wp in self.waypoints]
-        self.velocity_viz = []
-
-        self.log("Path: running {} waypoint(s) as one continuous glide "
-                  "(stops only at the last waypoint)...".format(len(self.waypoints)))
-        await self._launch_motion_task(self._stream_custom_trajectory(segments))
+        cur_xy = self._current_ee_xy_estimate(t1_cur, t2_cur)
+        points = [cur_xy] + [(wp["x"], wp["y"]) for wp in self.waypoints]
+        vmax = max(1.0, float(self.traj_cfg.get("cart_vmax_mm_s", 80.0)))
+        amax = max(1.0, float(self.traj_cfg.get("cart_amax_mm_s2", 400.0)))
+        lat_amax = max(1.0, float(self.traj_cfg.get("cart_lateral_amax_mm_s2", 200.0)))
+        await self._run_cartesian_points_move(
+            points, vmax, amax, lat_amax,
+            waypoints_viz=[(wp["x"], wp["y"]) for wp in self.waypoints],
+            log_label="Path ({} waypoint(s))".format(len(self.waypoints)))
 
     # ------------------------------------------------------------------
     # Custom Trajectory tab actions
@@ -3276,17 +3456,22 @@ class FiveBarDashboard:
         if not self.require_connected():
             return
 
+        bw_hz = max(0.1, float(self.traj_cfg.get("input_filter_bandwidth_hz", 4.0)))
+
         def _do():
             self.odrv0.axis0.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_POS_FILTER
+            self.odrv0.axis0.controller.config.input_filter_bandwidth = bw_hz
             self.odrv0.axis1.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_POS_FILTER
+            self.odrv0.axis1.controller.config.input_filter_bandwidth = bw_hz
             self.odrv0.axis0.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
             self.odrv0.axis1.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
 
         try:
             await run.io_bound(self._locked_call, _do)
-            self.log("Requested CLOSED_LOOP_CONTROL (position control, passthrough input) on both axes.")
+            self.log("Requested CLOSED_LOOP_CONTROL (position control, POS_FILTER input @ {:.2f} Hz) "
+                      "on both axes.".format(bw_hz))
         except Exception as e:
             self.log("Enable closed loop failed: {}".format(e))
 
@@ -3624,6 +3809,11 @@ class FiveBarDashboard:
         self.status_label.text = "Not connected (rebooting)"
         self.status_label.classes(remove="text-green-600", add="text-red-600")
 
+    def _on_global_keydown(self, e):
+        if e.action.keydown and not e.action.repeat and e.key.escape:
+            self.emergency_stop()
+            ui.notify("EMERGENCY STOP (Esc key)", type="negative")
+
     def emergency_stop(self):
         # Deliberately synchronous / not routed through run.io_bound so it
         # fires immediately even if other background operations are busy.
@@ -3673,12 +3863,16 @@ class FiveBarDashboard:
         self._motion_stop_event.clear()
         self._motion_active = False
 
+        bw_hz = max(0.1, float(self.traj_cfg.get("input_filter_bandwidth_hz", 4.0)))
+
         def _do():
             self.odrv0.clear_errors()
             self.odrv0.axis0.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_POS_FILTER
+            self.odrv0.axis0.controller.config.input_filter_bandwidth = bw_hz
             self.odrv0.axis1.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_POS_FILTER
+            self.odrv0.axis1.controller.config.input_filter_bandwidth = bw_hz
             self.odrv0.axis0.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
             self.odrv0.axis1.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
 
@@ -4028,6 +4222,10 @@ class FiveBarDashboard:
             self.traj_cfg["max_vel_deg_s"] = float(self.cfg_max_vel.value)
             self.traj_cfg["max_accel_deg_s2"] = float(self.cfg_max_accel.value)
             self.traj_cfg["control_rate_hz"] = max(1.0, float(self.cfg_control_rate.value))
+            self.traj_cfg["input_filter_bandwidth_hz"] = max(0.1, float(self.cfg_input_filter_bw.value))
+            self.traj_cfg["cart_vmax_mm_s"] = max(1.0, float(self.cfg_cart_vmax.value))
+            self.traj_cfg["cart_amax_mm_s2"] = max(1.0, float(self.cfg_cart_amax.value))
+            self.traj_cfg["cart_lateral_amax_mm_s2"] = max(1.0, float(self.cfg_cart_lat_amax.value))
             self.traj_cfg["motion_profile"] = self.cfg_motion_profile.value or "scurve"
 
             self.log("Config applied.")
@@ -4035,6 +4233,33 @@ class FiveBarDashboard:
             self.save_dashboard_config(silent=True)
         except (TypeError, ValueError) as e:
             ui.notify("Invalid config: {}".format(e), type="negative")
+
+    def _write_input_filter_bandwidth_blocking(self, bw_hz):
+        self.odrv0.axis0.controller.config.input_filter_bandwidth = bw_hz
+        self.odrv0.axis1.controller.config.input_filter_bandwidth = bw_hz
+
+    async def apply_input_filter_bandwidth_live(self):
+        """Pushes the Input filter bandwidth field straight to both axes'
+        controller.config.input_filter_bandwidth without needing to cycle
+        closed-loop control, so it can be tuned live while jogging/running a
+        path. Only takes effect on the ODrive while input_mode is already
+        POS_FILTER (set by Enable Closed Loop / Resume After E-Stop)."""
+        if not self.require_connected():
+            return
+        try:
+            bw_hz = max(0.1, float(self.cfg_input_filter_bw.value))
+        except (TypeError, ValueError) as e:
+            ui.notify("Invalid bandwidth: {}".format(e), type="negative")
+            return
+        self.traj_cfg["input_filter_bandwidth_hz"] = bw_hz
+        try:
+            await run.io_bound(self._locked_call, self._write_input_filter_bandwidth_blocking, bw_hz)
+            self.log("Input filter bandwidth set to {:.2f} Hz on both axes.".format(bw_hz))
+            ui.notify("Filter bandwidth applied: {:.2f} Hz".format(bw_hz), type="positive")
+            self.save_dashboard_config(silent=True)
+        except Exception as e:
+            self.log("Failed to apply input filter bandwidth: {}".format(e))
+            ui.notify("Failed to apply bandwidth: {}".format(e), type="negative")
 
     # ------------------------------------------------------------------
     # Live polling loop

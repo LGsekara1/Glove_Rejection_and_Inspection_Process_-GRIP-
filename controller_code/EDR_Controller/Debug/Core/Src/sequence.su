@@ -1,0 +1,3 @@
+../Core/Src/sequence.c:19:6:Sequence_Start	16	static
+../Core/Src/sequence.c:29:6:Sequence_IsRunning	4	static
+../Core/Src/sequence.c:34:6:Sequence_Update	24	static

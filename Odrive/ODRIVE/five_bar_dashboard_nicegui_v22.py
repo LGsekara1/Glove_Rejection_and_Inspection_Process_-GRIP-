@@ -88,6 +88,25 @@ Motion planning:
   steps to average the jitter out. Streaming from one dedicated thread with
   deadline-based (not sleep-after-work) timing removes that overhead and
   keeps the motor moving continuously until the actual final waypoint.
+
+  v22 change: the ODrive is now put into INPUT_MODE_POS_FILTER (was
+  INPUT_MODE_PASSTHROUGH) whenever closed-loop control is (re)enabled.
+  Under PASSTHROUGH, every ~100Hz input_pos write from the software
+  trapezoid was treated by the firmware as a brand-new step target,
+  including whatever jitter the Python/USB round-trip added to that
+  write's timing - that re-excited the firmware's position PD loop on
+  every tick and was the main source of the point-to-point oscillation.
+  POS_FILTER instead runs a critically-damped 2nd-order filter on
+  input_pos inside the firmware's own 8kHz loop, so the incoming stream
+  of setpoints gets smoothed in firmware instead of fought in software.
+  The filter's responsiveness is set by
+  controller.config.input_filter_bandwidth (Hz), exposed on the Config
+  tab as "Input filter bandwidth" - lower is smoother/more damped,
+  higher is snappier but closer to the old behavior. This is a
+  config-level change only; the software trapezoid/S-curve planner and
+  the streaming thread are unchanged, so it's a good first experiment to
+  run before anything bigger (e.g. switching to velocity control with a
+  Jacobian-based Cartesian tracker).
 """
 
 import math
@@ -123,6 +142,17 @@ AXIS_STATE_CLOSED_LOOP_CONTROL = 8
 
 CONTROL_MODE_POSITION_CONTROL = 3
 INPUT_MODE_PASSTHROUGH = 1
+# POS_FILTER runs a critically-damped 2nd-order low-pass filter on
+# controller.input_pos INSIDE the ODrive's own 8kHz control loop, instead of
+# treating every incoming input_pos write as a fresh step target the way
+# PASSTHROUGH does. Since the software trapezoid streams setpoints at only
+# ~100Hz (subject to USB/Python scheduling jitter), PASSTHROUGH mode was
+# turning every one of those writes into a small step input that re-excited
+# the firmware position loop - that's the main source of the oscillation.
+# POS_FILTER absorbs that jitter in firmware instead of fighting it in
+# software. Bandwidth is set via controller.config.input_filter_bandwidth
+# (Hz) - lower = smoother/more damped, higher = snappier/more responsive.
+INPUT_MODE_POS_FILTER = 3
 
 # The joint angle (deg, measured from the +X axis per this script's theta
 # convention) that the Calibration tab's "Sync Now" button assigns to
@@ -967,6 +997,13 @@ class FiveBarDashboard:
             # slightly quicker but with an instantaneous jerk at the start
             # of each accel/decel ramp).
             "motion_profile": "scurve",
+            # Firmware-side input filter bandwidth (Hz) used when in
+            # INPUT_MODE_POS_FILTER. Lower = smoother/more damped (better
+            # rejection of the software loop's setpoint jitter), higher =
+            # snappier tracking of the commanded trajectory. Start low
+            # (2-4 Hz) and raise it if the arm feels sluggish/laggy behind
+            # the commanded path; lower it if it's still oscillating.
+            "input_filter_bandwidth_hz": 4.0,
         }
 
         # Visualization display toggles.
@@ -2188,6 +2225,22 @@ class FiveBarDashboard:
         self.cfg_control_rate = ui.number(label="Control rate (Hz)", value=self.traj_cfg["control_rate_hz"])
 
         ui.label(
+            "Input filter bandwidth (Hz) - firmware-side smoothing of "
+            "incoming position setpoints (INPUT_MODE_POS_FILTER). This is "
+            "what actually damps out the point-to-point jerkiness/ringing: "
+            "instead of the ODrive treating every ~100Hz software setpoint "
+            "write as a fresh step target, it runs its own critically-"
+            "damped filter toward the moving target at 8kHz. Lower = "
+            "smoother but laggier tracking; higher = snappier but closer "
+            "to the old jerky behavior. Try 2-5 Hz first."
+        ).classes("text-xs text-gray-500")
+        with ui.row().classes("w-full items-center"):
+            self.cfg_input_filter_bw = ui.number(
+                label="Input filter bandwidth (Hz)",
+                value=self.traj_cfg["input_filter_bandwidth_hz"], min=0.1, step=0.5).classes("flex-1")
+            ui.button("Apply Bandwidth Now", on_click=self.apply_input_filter_bandwidth_live).classes("flex-1")
+
+        ui.label(
             "Motion profile - how acceleration is applied on point-to-point "
             "moves (Joint/IK tabs). S-Curve ramps acceleration up and down "
             "smoothly, which avoids the sharp jerk that tends to excite "
@@ -2324,6 +2377,7 @@ class FiveBarDashboard:
         self.cfg_max_vel.value = self.traj_cfg["max_vel_deg_s"]
         self.cfg_max_accel.value = self.traj_cfg["max_accel_deg_s2"]
         self.cfg_control_rate.value = self.traj_cfg["control_rate_hz"]
+        self.cfg_input_filter_bw.value = self.traj_cfg.get("input_filter_bandwidth_hz", 4.0)
         self.cfg_motion_profile.value = self.traj_cfg.get("motion_profile", "scurve")
         for msg in self._startup_messages:
             self.log(msg)
@@ -3276,17 +3330,22 @@ class FiveBarDashboard:
         if not self.require_connected():
             return
 
+        bw_hz = max(0.1, float(self.traj_cfg.get("input_filter_bandwidth_hz", 4.0)))
+
         def _do():
             self.odrv0.axis0.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_POS_FILTER
+            self.odrv0.axis0.controller.config.input_filter_bandwidth = bw_hz
             self.odrv0.axis1.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_POS_FILTER
+            self.odrv0.axis1.controller.config.input_filter_bandwidth = bw_hz
             self.odrv0.axis0.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
             self.odrv0.axis1.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
 
         try:
             await run.io_bound(self._locked_call, _do)
-            self.log("Requested CLOSED_LOOP_CONTROL (position control, passthrough input) on both axes.")
+            self.log("Requested CLOSED_LOOP_CONTROL (position control, POS_FILTER input @ {:.2f} Hz) "
+                      "on both axes.".format(bw_hz))
         except Exception as e:
             self.log("Enable closed loop failed: {}".format(e))
 
@@ -3673,12 +3732,16 @@ class FiveBarDashboard:
         self._motion_stop_event.clear()
         self._motion_active = False
 
+        bw_hz = max(0.1, float(self.traj_cfg.get("input_filter_bandwidth_hz", 4.0)))
+
         def _do():
             self.odrv0.clear_errors()
             self.odrv0.axis0.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_POS_FILTER
+            self.odrv0.axis0.controller.config.input_filter_bandwidth = bw_hz
             self.odrv0.axis1.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_POS_FILTER
+            self.odrv0.axis1.controller.config.input_filter_bandwidth = bw_hz
             self.odrv0.axis0.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
             self.odrv0.axis1.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
 
@@ -4028,6 +4091,7 @@ class FiveBarDashboard:
             self.traj_cfg["max_vel_deg_s"] = float(self.cfg_max_vel.value)
             self.traj_cfg["max_accel_deg_s2"] = float(self.cfg_max_accel.value)
             self.traj_cfg["control_rate_hz"] = max(1.0, float(self.cfg_control_rate.value))
+            self.traj_cfg["input_filter_bandwidth_hz"] = max(0.1, float(self.cfg_input_filter_bw.value))
             self.traj_cfg["motion_profile"] = self.cfg_motion_profile.value or "scurve"
 
             self.log("Config applied.")
@@ -4035,6 +4099,33 @@ class FiveBarDashboard:
             self.save_dashboard_config(silent=True)
         except (TypeError, ValueError) as e:
             ui.notify("Invalid config: {}".format(e), type="negative")
+
+    def _write_input_filter_bandwidth_blocking(self, bw_hz):
+        self.odrv0.axis0.controller.config.input_filter_bandwidth = bw_hz
+        self.odrv0.axis1.controller.config.input_filter_bandwidth = bw_hz
+
+    async def apply_input_filter_bandwidth_live(self):
+        """Pushes the Input filter bandwidth field straight to both axes'
+        controller.config.input_filter_bandwidth without needing to cycle
+        closed-loop control, so it can be tuned live while jogging/running a
+        path. Only takes effect on the ODrive while input_mode is already
+        POS_FILTER (set by Enable Closed Loop / Resume After E-Stop)."""
+        if not self.require_connected():
+            return
+        try:
+            bw_hz = max(0.1, float(self.cfg_input_filter_bw.value))
+        except (TypeError, ValueError) as e:
+            ui.notify("Invalid bandwidth: {}".format(e), type="negative")
+            return
+        self.traj_cfg["input_filter_bandwidth_hz"] = bw_hz
+        try:
+            await run.io_bound(self._locked_call, self._write_input_filter_bandwidth_blocking, bw_hz)
+            self.log("Input filter bandwidth set to {:.2f} Hz on both axes.".format(bw_hz))
+            ui.notify("Filter bandwidth applied: {:.2f} Hz".format(bw_hz), type="positive")
+            self.save_dashboard_config(silent=True)
+        except Exception as e:
+            self.log("Failed to apply input filter bandwidth: {}".format(e))
+            ui.notify("Failed to apply bandwidth: {}".format(e), type="negative")
 
     # ------------------------------------------------------------------
     # Live polling loop

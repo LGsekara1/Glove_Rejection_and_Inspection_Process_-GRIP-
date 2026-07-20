@@ -1,0 +1,3 @@
+../Core/Src/sequence.c:19:6:Sequence_Start	1
+../Core/Src/sequence.c:29:6:Sequence_IsRunning	1
+../Core/Src/sequence.c:34:6:Sequence_Update	15
