@@ -14,17 +14,8 @@
 **Automated Computer Vision + SCARA Robotic Quality Control System**  
 *Real-time glove orientation inspection, uncertainty rejection, and belt-synchronised robotic removal*
 
----
+<img src="media/system.jpeg" width = 50% height = "400">
 
-### Group MOSFET · ENTC, University of Moratuwa · 2026
-
-| Index | Name |
-|---|---|
-| 230212H | L.U.A. Gunasekara |
-| 230171E | C.D. Elapatha |
-| 230470U | T.S.R. Peiris |
-| 230318M | J.H.D. Kariyawasam |
-| 230507R | M.F.A. Rahman |
 
 </div>
 
@@ -91,51 +82,13 @@ For the MVP, this is safer than trying to achieve unrealistic 100% classificatio
 
 ## 🏗 Complete System Architecture
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│                        SENSING LAYER                        │
-│  Top-down camera                                             │
-│  Conveyor belt                                               │
-│  Rotary encoder, planned for belt position feedback          │
-└───────────────────────────────┬─────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    COMPUTER VISION LAYER                    │
-│  Current MVP: YOLO11n 3-class detect                         │
-│  Classes: left_glove, right_glove, unclear_glove             │
-│  Output: bbox + class + confidence                           │
-└───────────────────────────────┬─────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    DECISION + TRACKING LAYER                 │
-│  PASS / PICK decision                                        │
-│  Centroid tracking to avoid duplicate commands               │
-│  Configurable robot trigger line                             │
-│  Future: temporal voting over multiple frames                │
-└───────────────────────────────┬─────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────┐
-│                       CONTROL LAYER                         │
-│  PC-side live UI and command generation                      │
-│  USB-CDC serial link to STM32H7                              │
-│  Line-based ASCII PICK command protocol                      │
-│  STM32 acknowledgement support                               │
-│  Encoder-based pick timing, planned                          │
-└───────────────────────────────┬─────────────────────────────┘
-                                │
-                                ▼
-┌─────────────────────────────────────────────────────────────┐
-│                      ACTUATION LAYER                        │
-│  Parallel SCARA robot arm                                    │
-│  Pneumatic/vacuum gripper                                    │
-│  Reject bin / manual bin                                     │
-└─────────────────────────────────────────────────────────────┘
-```
+<div align="center">
+  <img src = "media/block_diagram.png" width = 50% height = 400>
+</div>
 
----
+
+
+
 
 ## 🤖 Mechanical and Robotic System
 
@@ -151,9 +104,16 @@ The robot mechanism selected for the project is a **parallel SCARA-style mechani
 | Simpler than delta robot for this application | Easier mechanical design and control |
 | Good for lightweight repetitive tasks | Suitable for glove rejection |
 
+<div align="center">
+  <img src = "media/ARM_sketch.png" width = 50% height = "400">
+</div>
+
 ### Planned end-effector
 
 The end-effector is planned as a **pneumatic/vacuum gripper** because gloves are soft, flexible, and difficult to grip mechanically with a rigid claw.
+
+
+<img src = "media/pneumatic.png" width = 50% height = "400">
 
 ```text
 Approach glove
@@ -177,23 +137,55 @@ Return to standby
 
 The real-time control layer is planned around an **STM32H7 microcontroller**. The reason for separating the control system from the vision system is that computer vision inference is non-deterministic compared to motor and encoder control. The PC/Jetson handles heavy vision processing, while the STM32 handles timing-critical robot control.
 
+ <p align = "center">
+  <img src = "media/comm.png" width = 45% height = "300">
+  
+  <img src = "media/main_controller_PCB_3d.png" width = 45% height = "300">
+ </p>
+ 
+---
+
+## ⚙️ Structural and enclosure Design
+
+The enclosure in which the electrial system was enclosed in was designed for sheet metal manufacturing constraints and manufactured locally.
+
+<p align = "center">
+  <img src = "media/Front_view_sheetmetal.png" width = 45% height = "300">
+  
+  <img src = "media/Internal_view_sheetmetal.png" width = 45% height = "300">
+ </p>
+ 
 ### Planned control responsibilities
 
 | Component | Responsibility |
 |---|---|
 | Vision processor | Camera capture, model inference, decision logic, command generation |
-| STM32H7 | Encoder counting, timing, motor/actuator control, safety interlocks |
-| Rotary encoder | Motor position measurement |
+| STM32H7 | Timing, central communication, control loops(if employed) |
+| Odrive | Main 3 control loop running |
 | SCARA motor controllers | Robot joint actuation |
 | Solenoid valves | Pneumatic/vacuum gripper control |
 | Status display/LEDs | Operator feedback |
 
 
 
-<div align="center">
 
-**Group MOSFET · ENTC, University of Moratuwa · 2026**
+---
+
+### Team MOSFET 2.0 · ENTC, University of Moratuwa · 2026
+
+<div align="center">
+  <img src = "media/Team.jpeg" width = 60% height = "400">
+</div>
+
+
+The project was developed by;
+  1. Sithum Peiris [@angstrom10](https://github.com/angstrom10)
+  2. Lakindu Gunasekara [@LGsekara1](https://github.com/angstrom10)
+  3. Hiruna Kariyawasam [@HirunaK](https://github.com/HirunaK)
+  4. Chathuka Elapatha [@Chippy1520](https://github.com/Chippy1520)
+  5. Abdul Rahman [@abdul-rahman-bme](https://github.com/abdul-rahman-bme)
+
 
 *GRIP - Glove Rejection and Inspection Process*
 
-</div>
+
