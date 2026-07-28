@@ -1,6 +1,6 @@
 """
-Five-Bar Linkage (Parallel SCARA) Control Dashboard - NiceGUI version
-========================================================================
+Five-Bar Linkage (Parallel SCARA) Control Dashboard - NiceGUI version (v22)
+==========================================================================
 
 Runs as a local web app (works on Python 3.8, no tkinter needed).
 
@@ -8,105 +8,80 @@ Install (Python 3.8 compatible release of NiceGUI):
     pip install odrive "nicegui==1.4.37"
 
 Run:
-    python five_bar_dashboard_nicegui.py
+    python five_bar_dashboard_nicegui_v22.py
 
 Then open the URL it prints (default http://127.0.0.1:8080) in a browser.
 
 Hardware: ODrive v3.6, firmware 0.5.6, odrive python lib 0.5.4
-Two motors (axis0, axis1) mounted at fixed base pivots, each driving a
-proximal link. Distal links connect the proximal link ends to a common
-end-effector point, forming a five-bar (2 base + 2 proximal + 2 distal
-meeting at the end effector) parallel linkage.
+Two motors (axis0, axis1) at fixed base pivots, each driving a proximal link.
+Distal links connect the proximal link ends to a common end-effector point,
+forming a five-bar parallel linkage. Encoders are SPI absolute (each on its
+own chip-select GPIO: axis0 -> GPIO_4, axis1 -> GPIO_3), so pos_estimate is in
+turns and survives ODrive power-cycles. There are no endstops; the zero
+reference is set purely in software ("Sync Now (Current Pose = 90deg)").
 
-Encoders: SPI absolute encoders (NOT the older ABI/incremental quadrature
-setup). Each axis's encoder is read over its own SPI chip-select line:
-  axis0 (M0) -> GPIO_4
-  axis1 (M1) -> GPIO_3
-These are configured via axis.encoder.config.mode (one of the
-ENCODER_MODE_SPI_ABS_* constants below) and
-axis.encoder.config.abs_spi_cs_gpio_pin, from the "Encoder Interface (SPI)"
-section of the Config tab. Because the encoders are absolute,
-encoder.pos_estimate is still reported in rotations (turns) exactly like the
-old incremental setup, but the absolute position is retained across ODrive
-power-cycles - there is no index-search / re-homing needed after power-on
-just to recover a valid turn count. turns_to_joint_deg()/joint_deg_to_turns()
-below still do the rotations-to-degrees conversion using the dashboard's own
-software home_angle_deg reference, which is tracked PER AXIS (a dict keyed
-0/1, not one shared value) - each motor's zero-pose reference is independent
-of the other's.
+WHAT CHANGED FROM v20 (this is a deliberate "do it raw" rewrite)
+----------------------------------------------------------------
+The old PC-side motion planner is gone. v20 discretized every move into a
+software S-curve / Hermite trajectory and streamed hundreds of input_pos
+setpoints from a background thread. v21 removes all of that (Path Planning,
+Custom Trajectory, Draw Path and Teach-By-Hand tabs, and their joint-space
+interpolators) and instead exposes the ODrive's own motion primitives:
 
-No limit switches / endstops are used on this build - min-endstop-based
-homing has been removed. The only way to set the zero reference is the
-"Sync Now (Current Pose = 90deg)" button on the Calibration tab: whatever
-pose the arm physically happens to be in when you press it becomes joint
-angle 90 degrees (measured from the +X axis, per the theta convention
-below) for both axes, from then on.
+1. POINT-TO-POINT MOVES use the ODrive firmware trapezoidal trajectory
+   planner (INPUT_MODE_TRAP_TRAJ). The PC sets each axis's
+   trap_traj.config.vel_limit / accel_limit / decel_limit and writes
+   input_pos ONCE; the firmware generates the profile. The two axes are
+   time-synchronized (the faster-moving axis's limits are scaled down so both
+   finish together) but the interpolation itself is done on the ODrive, not by
+   streaming discrete points. Used by the Joint Control and Inverse Kinematics
+   tabs.
 
-Geometry convention:
-  Motor A (axis0) is at (-L0/2, 0), Motor B (axis1) is at (+L0/2, 0).
-  theta1 / theta2 are measured from +X axis, counter-clockwise, in degrees,
-  and represent the angle of each PROXIMAL link relative to its motor base.
+2. VELOCITY CONTROL is real ODrive velocity control
+   (CONTROL_MODE_VELOCITY_CONTROL), NOT position control emulated with tiny
+   discrete steps. The new "Velocity Control" tab offers two Jacobian-based
+   modes:
+     a) Cartesian velocity JOG - you command an end-effector velocity vector
+        (mm/s); it is mapped through the inverse Jacobian to joint velocities
+        (deg/s -> turns/s) and written to controller.input_vel.
+     b) PC-SIDE CARTESIAN POSITION CONTROL - the position loop is closed on
+        the PC (not the ODrive): a control loop reads the live end-effector
+        pose (encoders -> forward kinematics), computes the Cartesian error to
+        a target, applies a proportional law to get a desired Cartesian
+        velocity, resolves it through the inverse Jacobian, and streams
+        input_vel. This is exactly "position control outside the ODrive, in
+        the PC", built on top of ODrive velocity control.
 
-Emergency stop / resume:
-  EMERGENCY STOP sets both axes to IDLE (un-powered) immediately. Axes left
-  IDLE will silently accept new input_pos writes without actually moving -
-  there's no error, the motor just doesn't turn - so after an E-stop, use
-  the "Resume After E-Stop" button (top bar) to clear errors and re-request
-  CLOSED_LOOP_CONTROL before commanding another move. Every move-initiating
-  action (Joint Control, IK, path/trajectory runs, raw-turns jogging) checks
-  both axes are actually in CLOSED_LOOP_CONTROL first and refuses with a
-  clear message instead of writing a no-op position command if not.
+3. LIVE GRAPHS: the right-hand panel now shows rolling plots of position
+   (deg), velocity (deg/s) and motor current (A, Iq_measured) for both axes,
+   fed from the poll loop when idle and from the motion/velocity threads while
+   moving.
 
-Motion planning:
-  All commanded moves (single-point IK moves, joint moves, and multi-point
-  paths) are streamed through a software trapezoidal velocity profile in
-  JOINT space (degrees/s, degrees/s^2), synchronized so both axes start and
-  stop together. This keeps commanded joint velocity bounded by design,
-  which is what fixes the "exceeds velocity limit" errors that happen when
-  a big position step is written directly to controller.input_pos. The
-  "Move Motors (raw turns)" control on the Joint Control tab is the one
-  exception - it writes input_pos directly/instantly, by design, for fine
-  manual jogging with small increments.
+SAFETY (velocity control can destroy a mechanism if unguarded - these layers
+are always on while a velocity session is active):
+  * ODrive hardware WATCHDOG: entering velocity mode enables
+    axis.config.enable_watchdog with a short axis.config.watchdog_timeout and
+    the PC loop calls axis.watchdog_feed() every tick. If the PC loop stalls
+    or dies, the ODrive faults to IDLE within the timeout instead of running
+    the last commanded velocity forever. This is the single most important
+    guard against a PC-side hiccup turning into a runaway.
+  * SINGULARITY handling: joint velocity for a given Cartesian velocity is
+    amplified near the five-bar's parallel singularities. The resolver
+    measures that amplification (sigma_max of the inverse Jacobian) and
+    smoothly de-rates commanded speed to zero as the pose approaches a
+    singularity, so the arm eases off instead of whipping. Unreachable /
+    degenerate poses are refused outright.
+  * JOINT VELOCITY hard clamp (deg/s) and a PC-side ACCELERATION (slew) clamp
+    (deg/s^2) on the commanded joint velocity, both direction-preserving.
+  * DEADMAN on the jog: if no fresh jog command arrives within a timeout the
+    commanded velocity is forced to zero.
+  * The ODrive's own controller.config.vel_limit remains the firmware hard
+    cap, and the global EMERGENCY STOP still idles both axes immediately.
 
-  NOTE: the software trapezoid limits *commanded* joint velocity. The
-  ODrive's own axis.controller.config.vel_limit is still the firmware's
-  hard safety limit. Set the Config tab's "Max joint velocity" comfortably
-  below whatever your vel_limit (turns/s) implies in deg/s for your gear
-  ratio, or you can still trip an overspeed error. Use the PID Tuning tab's
-  "Read AxisX" button to see the ODrive's current vel_limit.
-
-  Trajectory streaming architecture:
-  The whole trapezoidal move (however many control-loop steps it takes) now
-  runs inside a SINGLE background thread (one run.io_bound call for the
-  entire move), with absolute-time-scheduled writes directly to
-  controller.input_pos. Earlier versions awaited run.io_bound() separately
-  for every single step, which re-entered the asyncio event loop and the
-  NiceGUI thread pool on every tick; that per-step scheduling/handoff
-  overhead was frequently larger than the control-loop period itself, so
-  the arm would visibly pause-and-jump instead of gliding smoothly - most
-  noticeable on short, single-waypoint moves where there weren't enough
-  steps to average the jitter out. Streaming from one dedicated thread with
-  deadline-based (not sleep-after-work) timing removes that overhead and
-  keeps the motor moving continuously until the actual final waypoint.
-
-  v22 change: the ODrive is now put into INPUT_MODE_POS_FILTER (was
-  INPUT_MODE_PASSTHROUGH) whenever closed-loop control is (re)enabled.
-  Under PASSTHROUGH, every ~100Hz input_pos write from the software
-  trapezoid was treated by the firmware as a brand-new step target,
-  including whatever jitter the Python/USB round-trip added to that
-  write's timing - that re-excited the firmware's position PD loop on
-  every tick and was the main source of the point-to-point oscillation.
-  POS_FILTER instead runs a critically-damped 2nd-order filter on
-  input_pos inside the firmware's own 8kHz loop, so the incoming stream
-  of setpoints gets smoothed in firmware instead of fought in software.
-  The filter's responsiveness is set by
-  controller.config.input_filter_bandwidth (Hz), exposed on the Config
-  tab as "Input filter bandwidth" - lower is smoother/more damped,
-  higher is snappier but closer to the old behavior. This is a
-  config-level change only; the software trapezoid/S-curve planner and
-  the streaming thread are unchanged, so it's a good first experiment to
-  run before anything bigger (e.g. switching to velocity control with a
-  Jacobian-based Cartesian tracker).
+The ODrive lock, connection/retry logic, SPI absolute-encoder config,
+calibration / pre-calibration flags, software home reference, PID tuning +
+step-response tooling, and the SVG linkage visualization are carried over from
+v20 unchanged.
 """
 
 import math
@@ -142,17 +117,6 @@ AXIS_STATE_CLOSED_LOOP_CONTROL = 8
 
 CONTROL_MODE_POSITION_CONTROL = 3
 INPUT_MODE_PASSTHROUGH = 1
-# POS_FILTER runs a critically-damped 2nd-order low-pass filter on
-# controller.input_pos INSIDE the ODrive's own 8kHz control loop, instead of
-# treating every incoming input_pos write as a fresh step target the way
-# PASSTHROUGH does. Since the software trapezoid streams setpoints at only
-# ~100Hz (subject to USB/Python scheduling jitter), PASSTHROUGH mode was
-# turning every one of those writes into a small step input that re-excited
-# the firmware position loop - that's the main source of the oscillation.
-# POS_FILTER absorbs that jitter in firmware instead of fighting it in
-# software. Bandwidth is set via controller.config.input_filter_bandwidth
-# (Hz) - lower = smoother/more damped, higher = snappier/more responsive.
-INPUT_MODE_POS_FILTER = 3
 
 # The joint angle (deg, measured from the +X axis per this script's theta
 # convention) that the Calibration tab's "Sync Now" button assigns to
@@ -188,6 +152,108 @@ SPI_ENCODER_MODE_OPTIONS = {
 DASHBOARD_CONFIG_FILENAME = "five_bar_dashboard_config.json"
 TAUGHT_TRAJECTORY_FILENAME = "five_bar_taught_trajectory.json"
 
+from collections import deque
+
+# ---------------------------------------------------------------------------
+# Extra ODrive mode constants for this build (velocity control + firmware
+# trapezoidal trajectory). odrive.enums exports these too when the library is
+# installed; redefined here (matching ODrive firmware 0.5.6) so the dashboard
+# still imports and the viz still works without the hardware/library present.
+# ---------------------------------------------------------------------------
+CONTROL_MODE_VELOCITY_CONTROL = 2
+INPUT_MODE_VEL_RAMP = 2
+INPUT_MODE_TRAP_TRAJ = 5
+
+
+# ---------------------------------------------------------------------------
+# Cartesian -> joint velocity resolver, with singularity handling (pure math,
+# no hardware access). This is the heart of the Jacobian velocity control:
+# given a desired end-effector velocity it returns the joint velocities to
+# command, bounded so the mechanism cannot be driven past its safe limits.
+# ---------------------------------------------------------------------------
+def _svd2_singular_values(a, b, c, d):
+    """Largest and smallest singular values of the 2x2 matrix [[a, b], [c, d]]
+    (closed form). sigma_max is the worst-case gain of the matrix - here, how
+    much a unit Cartesian velocity can be amplified into joint velocity."""
+    e = (a + d) / 2.0
+    f = (a - d) / 2.0
+    g = (c + b) / 2.0
+    h = (c - b) / 2.0
+    q = math.hypot(e, h)
+    r = math.hypot(f, g)
+    return q + r, abs(q - r)
+
+
+def cartesian_to_joint_velocity(x, y, vx, vy, params, joint_vel_cap_deg_s,
+                                manip_soft, manip_hard):
+    """
+    Resolve a desired end-effector velocity (vx, vy) mm/s at pose (x, y) into
+    joint velocities (deg/s) for the five-bar, with layered safety:
+
+      1. A = numerical_jacobian(x, y) is d(theta)/d(xy) in deg/mm (the inverse
+         Jacobian). The naive joint velocity is w = A . [vx, vy].
+      2. SINGULARITY de-rating: sigma_max(A) (deg per mm) measures how strongly
+         a Cartesian velocity is amplified into joint velocity. As the pose
+         approaches a parallel singularity this grows without bound. Commanded
+         speed is scaled down smoothly once sigma_max crosses `manip_soft`,
+         reaching zero (full refusal) at `manip_hard` - the arm eases off near
+         a singularity instead of whipping. An unreachable / degenerate pose
+         (numerical_jacobian raises) is refused outright.
+      3. Hard CLAMP: whatever survives is scaled so neither joint exceeds
+         `joint_vel_cap_deg_s`, scaling BOTH joints by the same factor so the
+         Cartesian direction is preserved (the arm slows; it does not veer).
+
+    Returns (w1_deg_s, w2_deg_s, info). info keys:
+      ok         - False if the request was fully blocked (singular/unreachable)
+      reason     - short human-readable status
+      sigma_max  - joint/Cartesian amplification at this pose (deg/mm)
+      derate     - singularity speed factor applied (1.0 none .. 0.0 blocked)
+      clamp      - joint-velocity clamp factor applied (1.0 = none)
+    """
+    info = {"ok": True, "reason": "ok", "sigma_max": float("inf"),
+            "derate": 1.0, "clamp": 1.0}
+    try:
+        A = numerical_jacobian(x, y, params)
+    except Exception as e:
+        info.update(ok=False, reason="unreachable/singular pose", derate=0.0,
+                    detail=str(e))
+        return 0.0, 0.0, info
+
+    a, b = A[0][0], A[0][1]
+    c, d = A[1][0], A[1][1]
+    sigma_max, _sigma_min = _svd2_singular_values(a, b, c, d)
+    info["sigma_max"] = sigma_max
+
+    if not math.isfinite(sigma_max) or sigma_max <= 0.0:
+        info.update(ok=False, reason="degenerate Jacobian", derate=0.0)
+        return 0.0, 0.0, info
+
+    if manip_hard <= manip_soft:
+        manip_hard = manip_soft + 1e-6
+
+    if sigma_max >= manip_hard:
+        info.update(ok=False, reason="near singularity - motion blocked",
+                    derate=0.0)
+        return 0.0, 0.0, info
+    if sigma_max > manip_soft:
+        derate = (manip_hard - sigma_max) / (manip_hard - manip_soft)
+        info["reason"] = "near singularity - slowing"
+    else:
+        derate = 1.0
+    info["derate"] = derate
+
+    w1 = (a * vx + b * vy) * derate
+    w2 = (c * vx + d * vy) * derate
+
+    peak = max(abs(w1), abs(w2))
+    if peak > joint_vel_cap_deg_s and peak > 1e-9:
+        clamp = joint_vel_cap_deg_s / peak
+        w1 *= clamp
+        w2 *= clamp
+        info["clamp"] = clamp
+        if info["reason"] == "ok":
+            info["reason"] = "joint-speed-limited"
+    return w1, w2, info
 
 # ---------------------------------------------------------------------------
 # Kinematics helpers (pure functions, no hardware access)
@@ -319,48 +385,6 @@ def joint_velocity_from_cartesian(J, vx, vy):
     w2 = dt2dx * vx + dt2dy * vy
     return w1, w2
 
-
-# ---------------------------------------------------------------------------
-# Cubic Hermite spline helpers (pure math, no hardware access)
-#
-# Unlike the rest-to-rest trapezoidal profile below, these segments carry a
-# specified velocity at BOTH ends, so a chain of them can pass through a
-# waypoint without stopping - the building block for "match the conveyor
-# speed, then arrive at the pick point already moving with it."
-# ---------------------------------------------------------------------------
-def _hermite_basis(u):
-    u2 = u * u
-    u3 = u2 * u
-    h00 = 2 * u3 - 3 * u2 + 1
-    h10 = u3 - 2 * u2 + u
-    h01 = -2 * u3 + 3 * u2
-    h11 = u3 - u2
-    return h00, h10, h01, h11
-
-
-def hermite_pos(p0, v0, p1, v1, T, t):
-    """Position at time t (0..T) of a cubic Hermite segment from (p0, v0)
-    to (p1, v1) over duration T. Units of p and v must be consistent
-    (e.g. deg and deg/s)."""
-    if T <= 1e-9:
-        return p1
-    u = max(0.0, min(1.0, t / T))
-    h00, h10, h01, h11 = _hermite_basis(u)
-    return h00 * p0 + h10 * T * v0 + h01 * p1 + h11 * T * v1
-
-
-def hermite_vel(p0, v0, p1, v1, T, t):
-    """Velocity (d/dt) at time t of the same segment as hermite_pos()."""
-    if T <= 1e-9:
-        return v1
-    u = max(0.0, min(1.0, t / T))
-    dh00 = 6 * u * u - 6 * u
-    dh10 = 3 * u * u - 4 * u + 1
-    dh01 = -6 * u * u + 6 * u
-    dh11 = 3 * u * u - 2 * u
-    return (dh00 * p0 + dh10 * T * v0 + dh01 * p1 + dh11 * T * v1) / T
-
-
 # ---------------------------------------------------------------------------
 # Trapezoidal motion-profile helpers (pure math, no hardware access)
 # ---------------------------------------------------------------------------
@@ -390,574 +414,16 @@ def _trapezoid_timing(distance, vmax, amax):
 
     return total, t_acc, vpeak
 
-
-def _trapezoid_sample(t, distance, vmax, amax):
-    """Displacement magnitude (0..|distance|) covered at time t (seconds)."""
-    distance_abs = abs(distance)
-    total, t_acc, vpeak = _trapezoid_timing(distance_abs, vmax, amax)
-    if total <= 0:
-        return 0.0
-
-    t = max(0.0, min(t, total))
-    t_dec_start = total - t_acc
-
-    if t <= t_acc:
-        s = 0.5 * amax * t * t
-    elif t <= t_dec_start:
-        s = 0.5 * amax * t_acc * t_acc + vpeak * (t - t_acc)
-    else:
-        td = total - t
-        s = distance_abs - 0.5 * amax * td * td
-
-    return s
-
-
-def _scurve_timing(distance, vmax, amax):
-    """
-    Returns (total_time, t_acc, peak_velocity) for a jerk-smoothed
-    'cycloidal' S-curve profile: instead of snapping straight to amax the
-    instant the move starts (the sharp acceleration step a hard trapezoid
-    has - a classic cause of ringing/oscillation in a real mechanism with
-    any flex, belt stretch, or backlash), acceleration ramps up and back
-    down smoothly (a raised-cosine shape) across the same acceleration
-    phase. It still peaks at exactly amax and cruises at exactly vmax (same
-    limits, same destination, same overall shape as the trapezoid) - it
-    just gets there without the instantaneous jerk, at the cost of the
-    accel phase taking pi/2 (~1.57x) longer to cover the same speed change.
-    """
-    distance = abs(distance)
-    if distance <= 1e-9 or vmax <= 1e-9 or amax <= 1e-9:
-        return 0.0, 0.0, 0.0
-
-    # For a cycloidal ramp, peak accel = vpeak * pi / (2 * t_acc), so for a
-    # given amax: t_acc = vpeak * pi / (2 * amax). Distance covered during
-    # one ramp = vpeak * t_acc / 2 (a cycloidal curve averages to vpeak/2
-    # over the ramp, same as a straight-line ramp would).
-    t_acc = vmax * math.pi / (2 * amax)
-    d_acc = vmax * t_acc / 2
-
-    if 2 * d_acc >= distance:
-        # Triangular profile (never reaches vmax): vpeak^2 * pi/(2*amax) = distance
-        vpeak = math.sqrt(distance * 2 * amax / math.pi)
-        t_acc = vpeak * math.pi / (2 * amax)
-        total = 2 * t_acc
-    else:
-        d_flat = distance - 2 * d_acc
-        t_flat = d_flat / vmax
-        vpeak = vmax
-        total = 2 * t_acc + t_flat
-
-    return total, t_acc, vpeak
-
-
-def _scurve_sample(t, distance, vmax, amax):
-    """Displacement magnitude (0..|distance|) at time t for the cycloidal
-    S-curve profile described in _scurve_timing."""
-    distance_abs = abs(distance)
-    total, t_acc, vpeak = _scurve_timing(distance_abs, vmax, amax)
-    if total <= 0:
-        return 0.0
-
-    t = max(0.0, min(t, total))
-    t_dec_start = total - t_acc
-
-    def _ramp_dist(tt):
-        # Position covered tt seconds into a cycloidal ramp from 0 to
-        # vpeak over duration t_acc: integral of
-        # vpeak/2 * (1 - cos(pi*t/t_acc)) dt
-        if t_acc <= 1e-9:
-            return 0.0
-        return vpeak / 2 * (tt - (t_acc / math.pi) * math.sin(math.pi * tt / t_acc))
-
-    d_acc_total = _ramp_dist(t_acc)
-
-    if t <= t_acc:
-        s = _ramp_dist(t)
-    elif t <= t_dec_start:
-        s = d_acc_total + vpeak * (t - t_acc)
-    else:
-        td = total - t
-        s = distance_abs - _ramp_dist(td)
-
-    return s
-
-
-def synchronized_two_axis_profile(d1, d2, vmax, amax, profile="scurve"):
-    """
-    Builds two time-parameterized displacement functions pos1(t), pos2(t)
-    (each returning signed displacement from the start position) for two
-    axes moving distances d1, d2, sharing the same vmax/amax limits, but
-    synchronized to finish at the same time T = max(T1, T2). The shorter
-    move is stretched in time (never sped up), so neither axis ever exceeds
-    its own vmax/amax.
-
-    profile: "scurve" (default) uses the jerk-smoothed cycloidal ramp -
-        recommended for fast moves, since it avoids the instantaneous
-        acceleration step that tends to excite mechanical
-        ringing/oscillation. "trapezoid" uses the classic bang-bang
-        constant-acceleration ramp (reaches a given vmax/amax slightly
-        faster, at the cost of a sharp jerk at the start/end of each ramp).
-
-    Returns (T, pos1_fn, pos2_fn).
-    """
-    timing_fn = _scurve_timing if profile == "scurve" else _trapezoid_timing
-    sample_fn = _scurve_sample if profile == "scurve" else _trapezoid_sample
-
-    T1, _, _ = timing_fn(d1, vmax, amax)
-    T2, _, _ = timing_fn(d2, vmax, amax)
-    T = max(T1, T2)
-
-    if T <= 0:
-        return 0.0, (lambda t: 0.0), (lambda t: 0.0)
-
-    def pos1(t_global):
-        t_local = t_global * (T1 / T) if T1 > 0 else 0.0
-        mag = sample_fn(t_local, d1, vmax, amax)
-        return math.copysign(mag, d1) if d1 != 0 else 0.0
-
-    def pos2(t_global):
-        t_local = t_global * (T2 / T) if T2 > 0 else 0.0
-        mag = sample_fn(t_local, d2, vmax, amax)
-        return math.copysign(mag, d2) if d2 != 0 else 0.0
-
-    return T, pos1, pos2
-
-
 # ---------------------------------------------------------------------------
-# Multi-waypoint Hermite chain builder (pure math, no hardware access)
-#
-# This is what makes a multi-waypoint move glide THROUGH interior waypoints
-# instead of stopping at each one: rather than chaining independent
-# rest-to-rest trapezoids (velocity forced to 0 at every waypoint), a single
-# "through velocity" is estimated at each interior waypoint (a corner-aware
-# bisector estimate, only going to zero at a genuine sharp reversal - not a
-# plain central difference, which cancels near zero at any local wiggle)
-# and the whole chain is played back as
-# one continuous cubic-Hermite spline in joint space. Velocity is only ever
-# forced to zero at the very first and very last point of the chain (or
-# anywhere the caller explicitly pins it via `fixed`).
-# ---------------------------------------------------------------------------
-def segment_duration_estimate(d1, d2, vmax, amax):
-    """Rough duration (s) for a joint-space leg of (d1, d2) degrees. Reused
-    just to size how much time a leg 'deserves' relative to its neighbors
-    when the caller hasn't specified an explicit duration (e.g. Path
-    Planning, where the person only gives positions, not timing)."""
-    T, _, _ = _trapezoid_timing(math.hypot(d1, d2), vmax, amax)
-    return max(T, 0.05)
-
-
-_CORNER_DEADZONE_DEG_DEFAULT = 25.0
-
-
-def resolve_chain_velocities(chain, durations, vmax, fixed=None, corner_deadzone_deg=_CORNER_DEADZONE_DEG_DEFAULT):
-    """
-    chain: list of (t1, t2) joint-space waypoints, length N (N >= 2).
-    durations: list of N-1 leg durations (seconds), durations[i] is the time
-        allotted for chain[i] -> chain[i+1].
-    vmax: per-axis joint velocity limit (deg/s), used to clamp auto-estimated
-        interior velocities.
-    fixed: optional list of length N; fixed[i] = (w1, w2) pins that
-        waypoint's velocity exactly (used for manually-specified velocities,
-        e.g. matching a conveyor). fixed[i] = None (or omitted / fixed=None
-        entirely) means "auto-estimate this waypoint's through velocity".
-        Waypoints 0 and N-1 default to (0, 0) when not pinned, so the chain
-        is at rest at the very start and very end unless the caller says
-        otherwise.
-
-    For interior waypoints this uses a corner-aware estimate rather than a
-    plain central difference: direction is the bisector of the incoming and
-    outgoing leg directions, and speed is the slower of the two legs' own
-    average speeds, scaled down by how sharp the turn is (full speed for a
-    straight line, all the way down to 0 only at a genuine ~180 degree
-    reversal). A plain central difference ((P[i+1]-P[i-1]) / dt) also goes
-    to ~0 near a reversal, but it does so gradually and continuously - it
-    can dip to near-zero at ANY local wiggle (e.g. hand tremor in a drawn
-    path), not just an actual sharp corner, which is what made a noisy
-    input look like it was stopping at every sample. The bisector approach
-    only kills speed for a real sharp turn.
-
-    Returns (velocities, auto_mask) where velocities is a list of N (w1, w2)
-    tuples and auto_mask[i] is True where that entry was auto-estimated
-    (so callers doing further iterative adjustment know which entries are
-    safe to damp without discarding a value the user pinned on purpose).
-    """
-    n = len(chain)
-    fixed = list(fixed) if fixed is not None else [None] * n
-    while len(fixed) < n:
-        fixed.append(None)
-
-    vel = [None] * n
-    auto_mask = [False] * n
-
-    vel[0] = fixed[0] if fixed[0] is not None else (0.0, 0.0)
-    vel[-1] = fixed[-1] if fixed[-1] is not None else (0.0, 0.0)
-
-    for i in range(1, n - 1):
-        if fixed[i] is not None:
-            vel[i] = fixed[i]
-            continue
-        auto_mask[i] = True
-
-        ax, ay = chain[i - 1]
-        bx, by = chain[i]
-        cx, cy = chain[i + 1]
-        in_dx, in_dy = bx - ax, by - ay
-        out_dx, out_dy = cx - bx, cy - by
-        len_in = math.hypot(in_dx, in_dy)
-        len_out = math.hypot(out_dx, out_dy)
-
-        if len_in <= 1e-9 or len_out <= 1e-9:
-            vel[i] = (0.0, 0.0)
-            continue
-
-        t_in = durations[i - 1]
-        t_out = durations[i]
-        speed_in = len_in / t_in if t_in > 1e-9 else 0.0
-        speed_out = len_out / t_out if t_out > 1e-9 else 0.0
-        base_speed = min(speed_in, speed_out)
-
-        uin = (in_dx / len_in, in_dy / len_in)
-        uout = (out_dx / len_out, out_dy / len_out)
-        cos_turn = max(-1.0, min(1.0, uin[0] * uout[0] + uin[1] * uout[1]))
-        # Angles shallower than ~25 degrees are treated as still basically
-        # straight - this matters most for a smooth curve that's been
-        # discretized into many waypoints (e.g. a drawn sketch): even a
-        # perfectly smooth arc looks like a series of small-angle "corners"
-        # once it's chopped into a polyline, and those shouldn't cost speed
-        # the way a real sharp turn should. Below the deadzone, corner_scale
-        # ramps from 1.0 down to 0.0 only at a genuine ~180 degree reversal.
-        deadzone_cos = math.cos(math.radians(corner_deadzone_deg))
-        if cos_turn >= deadzone_cos:
-            corner_scale = 1.0
-        else:
-            denom = 1.0 + deadzone_cos
-            corner_scale = math.sqrt(max(0.0, (1.0 + cos_turn) / denom)) if denom > 1e-9 else 0.0
-        through_speed = base_speed * corner_scale
-
-        bis_x, bis_y = uin[0] + uout[0], uin[1] + uout[1]
-        bis_len = math.hypot(bis_x, bis_y)
-        if bis_len <= 1e-9:
-            # Near-exact reversal: direction is undefined but speed is
-            # already ~0, so any direction is fine.
-            dirx, diry = uout
-        else:
-            dirx, diry = bis_x / bis_len, bis_y / bis_len
-
-        w1 = dirx * through_speed
-        w2 = diry * through_speed
-        mag = math.hypot(w1, w2)
-        if mag > vmax and mag > 1e-9:
-            scale = vmax / mag
-            w1 *= scale
-            w2 *= scale
-        vel[i] = (w1, w2)
-
-    return vel, auto_mask
-
-
-def build_hermite_chain(chain, durations, vmax, amax, fixed=None, max_iter=10,
-                         corner_deadzone_deg=_CORNER_DEADZONE_DEG_DEFAULT):
-    """
-    Builds a list of Hermite segment dicts - each shaped exactly like the
-    ones _stream_custom_trajectory_blocking already consumes: {"t1_0",
-    "w1_0", "t1_1", "w1_1", "t2_0", "w2_0", "t2_1", "w2_1", "T"} - that pass
-    smoothly through every point in `chain` (a list of (t1, t2) joint
-    angles in degrees), coming to rest only where `fixed` says to (by
-    default: only the first and last point).
-
-    corner_deadzone_deg: turns shallower than this (see
-        resolve_chain_velocities) get full speed with no slowdown at all -
-        tune this up if a coarse/faceted path is still slowing down more
-        than it should, or down if real corners aren't being respected
-        tightly enough.
-
-    Interior through-velocities are auto-estimated then iteratively damped
-    (only the auto-estimated ones - anything pinned via `fixed` is left
-    exactly as given) against two failure modes:
-
-    1. Peak joint acceleration over amax - the chain still respects the
-       configured accel limit even though it's no longer stopping at every
-       waypoint to absorb it for free.
-    2. Mid-segment speed dip: a cubic Hermite segment only guarantees the
-       right velocity AT its two endpoints - nothing forces the speed in
-       BETWEEN them to behave. If a waypoint's estimated direction (the
-       incoming/outgoing bisector) points far enough away from the
-       straight chord to the next waypoint, the curve has to bow away from
-       that chord and back, and its speed can sag toward zero partway
-       through the segment even though both endpoints have healthy
-       nonzero velocity. That looks exactly like the arm stopping "along
-       the line" rather than at a waypoint. This is checked for and damped
-       the same way as the acceleration limit.
-    """
-    n = len(chain)
-    if n < 2:
-        return []
-    vel, auto_mask = resolve_chain_velocities(chain, durations, vmax, fixed=fixed,
-                                               corner_deadzone_deg=corner_deadzone_deg)
-
-    def _segments_from(vel):
-        segs = []
-        for i in range(n - 1):
-            a, b = chain[i], chain[i + 1]
-            wa, wb = vel[i], vel[i + 1]
-            segs.append({
-                "t1_0": a[0], "t2_0": a[1], "w1_0": wa[0], "w2_0": wa[1],
-                "t1_1": b[0], "t2_1": b[1], "w1_1": wb[0], "w2_1": wb[1],
-                "T": durations[i],
-            })
-        return segs
-
-    for _ in range(max_iter):
-        segs = _segments_from(vel)
-        worst_ratio = 1.0
-        samples = 12
-        for seg in segs:
-            T = seg["T"]
-            if T <= 1e-9:
-                continue
-            speeds = []
-            prev_v1 = prev_v2 = prev_t = None
-            for s in range(samples + 1):
-                t = T * s / samples
-                v1 = hermite_vel(seg["t1_0"], seg["w1_0"], seg["t1_1"], seg["w1_1"], T, t)
-                v2 = hermite_vel(seg["t2_0"], seg["w2_0"], seg["t2_1"], seg["w2_1"], T, t)
-                speeds.append(math.hypot(v1, v2))
-                if prev_t is not None:
-                    dtt = t - prev_t
-                    if dtt > 1e-9:
-                        worst_ratio = max(worst_ratio,
-                                           abs(v1 - prev_v1) / dtt / amax,
-                                           abs(v2 - prev_v2) / dtt / amax)
-                prev_v1, prev_v2, prev_t = v1, v2, t
-
-            # Mid-segment speed-dip check: compare the slowest point
-            # strictly inside the segment against its two endpoint speeds.
-            # If both endpoints intend real motion but the interior sags
-            # well below that, the curve is bowing - damp it.
-            boundary_min = min(speeds[0], speeds[-1])
-            if boundary_min > 1.0:  # deg/s - skip segments meant to be near rest anyway
-                interior_min = min(speeds[1:-1]) if len(speeds) > 2 else boundary_min
-                if interior_min < 0.5 * boundary_min:
-                    dip_ratio = boundary_min / max(interior_min, 1e-6)
-                    worst_ratio = max(worst_ratio, dip_ratio)
-
-        if worst_ratio <= 1.02:
-            break
-        damp = 1.0 / math.sqrt(worst_ratio)
-        for i in range(n):
-            if auto_mask[i]:
-                vel[i] = (vel[i][0] * damp, vel[i][1] * damp)
-
-    return _segments_from(vel)
-
-
-def smooth_polyline(points, window=7):
-    """Centered moving-average smoothing over a list of (x, y) points.
-    Used to tame hand tremor/jitter in a mouse-drawn sketch before it's
-    turned into waypoints - a raw drawn path is full of tiny back-and-forth
-    wiggles that read as sharp corners to the velocity estimator even
-    though the person didn't intend a real direction change. Endpoints are
-    kept exactly so the sketch still starts/ends where drawn."""
-    n = len(points)
-    if n <= 2 or window <= 1:
-        return list(points)
-    half = window // 2
-    out = [points[0]]
-    for i in range(1, n - 1):
-        lo = max(0, i - half)
-        hi = min(n, i + half + 1)
-        chunk = points[lo:hi]
-        xs = sum(p[0] for p in chunk)
-        ys = sum(p[1] for p in chunk)
-        out.append((xs / len(chunk), ys / len(chunk)))
-    out.append(points[-1])
-    return out
-
-
-def resample_polyline(points, n_out):
-    """Resamples a polyline of (x, y) points to n_out points evenly spaced
-    by arc length. Used to turn a raw mouse-drawn sketch (hundreds of
-    jittery pixel points) into a small, even set of waypoints before IK/
-    Hermite processing. If the input already has <= 2 points or n_out <= 2,
-    it's returned unchanged."""
-    if len(points) <= 2 or n_out <= 2:
-        return list(points)
-    seg_lens = []
-    total = 0.0
-    for i in range(len(points) - 1):
-        d = math.hypot(points[i + 1][0] - points[i][0], points[i + 1][1] - points[i][1])
-        seg_lens.append(d)
-        total += d
-    if total <= 1e-9:
-        return [points[0], points[-1]]
-
-    out = [points[0]]
-    target_step = total / (n_out - 1)
-    acc = 0.0
-    next_target = target_step
-    for i in range(len(points) - 1):
-        seg_len = seg_lens[i]
-        if seg_len <= 1e-12:
-            continue
-        seg_start_acc = acc
-        while next_target <= acc + seg_len and len(out) < n_out - 1:
-            u = (next_target - seg_start_acc) / seg_len
-            x = points[i][0] + u * (points[i + 1][0] - points[i][0])
-            y = points[i][1] + u * (points[i + 1][1] - points[i][1])
-            out.append((x, y))
-            next_target += target_step
-        acc += seg_len
-    out.append(points[-1])
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Curvature-limited path-timing engine (alternative to the waypoint-Hermite-
-# chain approach above). Instead of assigning a velocity to each waypoint
-# and blending between them, this decouples the PATH (a dense, purely
-# geometric polyline - no timing in it at all) from the TIMING (a scalar
-# speed-vs-arc-length law derived from real physical limits: a hard speed
-# cap, a tangential accel/decel cap, and a lateral/centripetal accel cap
-# that naturally slows the path down through tight curves and lets it run
-# at full speed through gentle ones - no angle heuristics involved). This
-# is the standard "look-ahead" planner technique used in CNC/3D-printer
-# motion control (grbl/Marlin-style forward/backward speed smoothing).
-# ---------------------------------------------------------------------------
-def path_arc_lengths(points):
-    """Cumulative arc length at each point of a polyline; points[0] -> 0.0."""
-    s = [0.0]
-    for i in range(1, len(points)):
-        d = math.hypot(points[i][0] - points[i - 1][0], points[i][1] - points[i - 1][1])
-        s.append(s[-1] + d)
-    return s
-
-
-def path_curvature(points):
-    """Discrete curvature magnitude (1/radius) at each point, via the
-    Menger curvature of the triangle formed by that point and its two
-    neighbors. Endpoints get 0 (no cornering constraint at the very open
-    ends of the path)."""
-    n = len(points)
-    kappa = [0.0] * n
-    for i in range(1, n - 1):
-        ax, ay = points[i - 1]
-        bx, by = points[i]
-        cx, cy = points[i + 1]
-        area2 = abs((bx - ax) * (cy - ay) - (cx - ax) * (by - ay))
-        ab = math.hypot(bx - ax, by - ay)
-        bc = math.hypot(cx - bx, cy - by)
-        ca = math.hypot(ax - cx, ay - cy)
-        denom = ab * bc * ca
-        kappa[i] = 0.0 if denom <= 1e-9 else 2.0 * area2 / denom
-    return kappa
-
-
-def plan_curvature_limited_speed(points, vmax, amax, lateral_amax):
-    """
-    Given a dense polyline `points`, a hard speed cap `vmax`, a tangential
-    (speeding up/slowing down) acceleration cap `amax`, and a lateral
-    (centripetal) acceleration cap `lateral_amax`, returns (s_list, v_list)
-    - the cumulative arc length and the maximum safe speed at every point,
-    starting and ending at rest.
-
-    The per-point speed cap comes straight from how tightly the path
-    curves there (v <= sqrt(lateral_amax / curvature) - an actual physical
-    limit on cornering speed, not a heuristic), then a forward pass
-    enforces the tangential accel limit ramping speed up from rest, and a
-    backward pass enforces it ramping speed down in time for any upcoming
-    slow spot (and down to rest at the very end).
-    """
-    n = len(points)
-    if n < 2:
-        return [0.0] * n, [0.0] * n
-
-    s_list = path_arc_lengths(points)
-    kappa = path_curvature(points)
-
-    v_cap = []
-    for k in kappa:
-        v_cap.append(vmax if k <= 1e-9 else min(vmax, math.sqrt(lateral_amax / k)))
-
-    v_fwd = [0.0] * n
-    for i in range(1, n):
-        ds = s_list[i] - s_list[i - 1]
-        v_fwd[i] = min(v_cap[i], math.sqrt(v_fwd[i - 1] ** 2 + 2 * amax * ds))
-
-    v = list(v_fwd)
-    v[-1] = 0.0
-    for i in range(n - 2, -1, -1):
-        ds = s_list[i + 1] - s_list[i]
-        v[i] = min(v[i], math.sqrt(v[i + 1] ** 2 + 2 * amax * ds))
-
-    return s_list, v
-
-
-def integrate_path_timing(s_list, v_list):
-    """Given cumulative arc length and planned speed at each point (from
-    plan_curvature_limited_speed), integrates constant-acceleration
-    kinematics segment by segment to get the cumulative TIME at each
-    point. Returns (T_list, accels) - T_list[0] = 0, and accels (length
-    n-1) is reused by sample_curvature_path to invert s(t) at playback."""
-    n = len(s_list)
-    T = [0.0] * n
-    accels = []
-    for i in range(n - 1):
-        ds = s_list[i + 1] - s_list[i]
-        v0, v1 = v_list[i], v_list[i + 1]
-        if ds <= 1e-9:
-            accels.append(0.0)
-            T[i + 1] = T[i]
-            continue
-        a = (v1 * v1 - v0 * v0) / (2 * ds)
-        accels.append(a)
-        if abs(a) > 1e-9:
-            dt = (v1 - v0) / a
-        else:
-            vavg = max(1e-6, (v0 + v1) / 2)
-            dt = ds / vavg
-        T[i + 1] = T[i] + max(0.0, dt)
-    return T, accels
-
-
-def sample_curvature_path(t_query, points, s_list, T_list, v_list, accels, start_idx=0):
-    """
-    Returns ((x, y), next_idx): the interpolated Cartesian position on the
-    path at elapsed time t_query, plus the segment index to resume
-    searching from on the next call (playback calls this every control
-    tick with increasing t_query, so passing the last index back avoids
-    re-scanning from the start every time). Uses constant-acceleration
-    kinematics within each segment (inverted from the same accel/speed
-    values integrate_path_timing used to build T_list) to find exactly how
-    far along the segment we are at t_query.
-    """
-    n = len(points)
-    idx = max(0, min(start_idx, n - 2))
-    while idx < n - 2 and T_list[idx + 1] <= t_query:
-        idx += 1
-    t0 = T_list[idx]
-    v0 = v_list[idx]
-    a = accels[idx] if idx < len(accels) else 0.0
-    seg_len = s_list[idx + 1] - s_list[idx]
-    dt = max(0.0, t_query - t0)
-    ds = v0 * dt + 0.5 * a * dt * dt
-    ds = max(0.0, min(ds, seg_len))
-    u = 0.0 if seg_len <= 1e-9 else ds / seg_len
-    x = points[idx][0] + u * (points[idx + 1][0] - points[idx][0])
-    y = points[idx][1] + u * (points[idx + 1][1] - points[idx][1])
-    return (x, y), idx
-
-
-# ---------------------------------------------------------------------------
-# Dashboard application
+# Main dashboard
 # ---------------------------------------------------------------------------
 class FiveBarDashboard:
     def __init__(self):
         self.odrv0 = None
         self.connected = False
 
-        # Messages produced before self.log_box exists (e.g. while loading
-        # saved settings) get buffered here and flushed once build_ui() has
-        # created the log widget.
+        # Messages produced before self.log_box exists get buffered here and
+        # flushed once build_ui() has created the log widget.
         self._startup_messages = []
 
         self.params = {
@@ -977,33 +443,35 @@ class FiveBarDashboard:
         }
         self.home_angle_deg = {0: 90.0, 1: 90.0}
 
-        # SPI absolute encoder interface config: which GPIO each axis's
-        # encoder chip-select line is wired to, and which SPI absolute
-        # encoder chip/protocol it is. M0 (axis0) -> GPIO_4, M1 (axis1) ->
-        # GPIO_3 per the wiring for this build.
+        # SPI absolute encoder interface config (which CS GPIO + which chip).
         self.spi_cfg = {
             0: {"cs_gpio": 4, "mode": ENCODER_MODE_SPI_ABS_AMS},
             1: {"cs_gpio": 3, "mode": ENCODER_MODE_SPI_ABS_AMS},
         }
 
-        # Software trapezoidal motion-planning limits (joint space).
+        # Point-to-point move limits. These are now handed to the ODrive
+        # firmware trapezoidal trajectory planner (trap_traj.config.*), NOT
+        # used to build a PC-side profile. Kept in joint deg for the UI and
+        # converted to motor turns per axis at move time.
         self.traj_cfg = {
             "max_vel_deg_s": 60.0,
             "max_accel_deg_s2": 120.0,
-            "control_rate_hz": 100.0,
-            # "scurve" (jerk-smoothed, recommended - avoids the sharp
-            # acceleration step that tends to excite mechanical ringing on
-            # fast moves) or "trapezoid" (classic bang-bang, reaches speed
-            # slightly quicker but with an instantaneous jerk at the start
-            # of each accel/decel ramp).
-            "motion_profile": "scurve",
-            # Firmware-side input filter bandwidth (Hz) used when in
-            # INPUT_MODE_POS_FILTER. Lower = smoother/more damped (better
-            # rejection of the software loop's setpoint jitter), higher =
-            # snappier tracking of the commanded trajectory. Start low
-            # (2-4 Hz) and raise it if the arm feels sluggish/laggy behind
-            # the commanded path; lower it if it's still oscillating.
-            "input_filter_bandwidth_hz": 4.0,
+        }
+
+        # Velocity-control (Jacobian) safety + tuning parameters. Every one of
+        # these bounds what the velocity loop can command; see the resolver and
+        # _velocity_loop_blocking for how each is used.
+        self.vel_cfg = {
+            "loop_hz": 60.0,                 # PC control-loop rate
+            "joint_vel_cap_deg_s": 45.0,     # hard clamp on |joint speed|
+            "joint_accel_cap_deg_s2": 180.0, # PC-side slew limit on joint speed
+            "max_cart_speed_mm_s": 80.0,     # cap on commanded EE speed
+            "pos_kp": 3.0,                   # PC Cartesian position P gain (1/s)
+            "pos_tol_mm": 1.0,               # position-loop "arrived" tolerance
+            "manip_soft_deg_mm": 3.0,        # start de-rating above this sigma_max
+            "manip_hard_deg_mm": 8.0,        # fully block at/above this sigma_max
+            "watchdog_s": 0.15,              # ODrive auto-idles if PC stops feeding
+            "deadman_s": 0.5,                # jog auto-stops if no fresh command
         }
 
         # Visualization display toggles.
@@ -1011,61 +479,45 @@ class FiveBarDashboard:
             "show_workspace": True,
         }
 
-        # Motion-execution state
+        # Motion-execution state (shared by trap moves and velocity control).
         self.motion_task = None
         self._motion_active = False
         self._motion_stop_event = threading.Event()
         self._viz_queue = queue.Queue(maxsize=1)
 
-        # Serializes ALL actual ODrive/USB access across threads. NiceGUI's
-        # run.io_bound() uses a shared thread pool, so without this, a
-        # periodic poll_live() read can end up running on a different OS
-        # thread at the exact same moment as, say, save_configuration()
-        # triggering a reboot - two threads hitting the same USB handle at
-        # once. On Windows this has been observed to corrupt an in-flight
-        # libusb transfer ("Transfer on EP 0x03 still in progress... This is
-        # gonna be messy") and crash the process with an access violation in
-        # a native callback. Every function that touches self.odrv0 should
-        # go through _locked_call() so only one thread ever talks to the
-        # device at a time.
+        # Serializes ALL actual ODrive/USB access across threads (see comment
+        # in v20 - libusb is not safe to touch from two threads at once).
         self._odrv_lock = threading.Lock()
 
-        # Visualization overlays for planned/preview paths
-        self.planned_path = []     # list of (x, y) mm points sampled along the plan
-        self.waypoints_viz = []    # list of (x, y) mm waypoint markers to draw
-
-        # Path Planning waypoint list: [{"x": .., "y": ..}, ...]
-        self.waypoints = []
-
-        # Custom Trajectory waypoint list: [{"x","y","vx","vy","duration"}, ...]
-        # vx/vy are desired end-effector Cartesian velocity (mm/s) AT that
-        # waypoint; duration is seconds from the previous waypoint (or from
-        # the current pose, for the first one). Velocity is continuous
-        # through waypoints via a cubic Hermite blend - the arm only stops
-        # where a waypoint's velocity is (0, 0).
-        self.custom_waypoints = []
-        # velocity-arrow overlay for the visualization: [(x, y, vx, vy), ...]
+        # Visualization overlays (kept so render_svg still works; used now to
+        # show the current velocity-control target marker).
+        self.planned_path = []
+        self.waypoints_viz = []
         self.velocity_viz = []
 
-        # Teach-by-hand state: recorded samples are (t_elapsed_s, t1_deg,
-        # t2_deg, w1_deg_s, w2_deg_s) tuples - both position AND the
-        # ODrive's own encoder velocity estimate - captured while the axes
-        # are IDLE (backdrivable) and a person moves the end effector by
-        # hand.
-        self.taught_trajectory = []
-        self._teach_recording = False
-        self._teach_stop_event = threading.Event()
-        self._teach_task = None
+        # Velocity-control session state.
+        self._vel_task = None
+        self._vel_mode = False
+        self._vel_submode = "jog"            # "jog" or "position"
+        self._vel_stop_event = threading.Event()
+        self._vel_cmd = {"vx": 0.0, "vy": 0.0}   # jog command (mm/s)
+        self._vel_cmd_time = 0.0                 # perf_counter of last jog cmd
+        self._vel_target = None                  # (x, y) mm for position mode
+        self._vel_status = {"text": "idle", "class": "text-gray-500"}
+
+        # Live telemetry (position / velocity / current) ring buffer. Producers
+        # (poll loop when idle; motion + velocity threads while moving) push
+        # samples onto _telemetry_queue; the UI-thread _drain_telemetry timer
+        # moves them into _telemetry_buffer and refreshes the charts.
+        self._telem_window_s = 20.0
+        self._telemetry_buffer = deque(maxlen=1500)
+        self._telemetry_queue = queue.Queue()
+        self._telem_t0 = time.perf_counter()
 
         # PID tuning history (for overlaid step-response comparisons)
-        self.step_test_history = []  # list of dicts: samples, start_pos, target, label, color
+        self.step_test_history = []
 
-        # Overwrite the hardcoded defaults above with anything saved from a
-        # previous run of this script, if present. Must happen BEFORE
-        # build_ui() so the Config-tab fields are created with the loaded
-        # values already in self.params / self.axis_cfg / etc.
         self._load_dashboard_config()
-
         self.build_ui()
 
     # ------------------------------------------------------------------
@@ -1074,11 +526,17 @@ class FiveBarDashboard:
     def build_ui(self):
         ui.page_title("Five-Bar Linkage Dashboard")
 
+        # Global ESC-key emergency stop. `ignore=[]` overrides NiceGUI's
+        # default of not firing key events while an input/select/button/
+        # textarea has focus - E-stop must work no matter what's focused
+        # (e.g. mid-typing in a jog-velocity number field).
+        ui.keyboard(on_key=self._on_key, ignore=[])
+
         with ui.row().classes("w-full items-center justify-between p-2"):
             self.connect_btn = ui.button("Connect to ODrive", on_click=self.connect_odrive)
             self.status_label = ui.label("Not connected").classes("text-red-600 font-bold")
             with ui.row().classes("items-center gap-2"):
-                ui.button("Stop Trajectory", on_click=self.abort_motion, color="orange")
+                ui.button("Stop Motion", on_click=self.abort_motion, color="orange")
                 ui.button("EMERGENCY STOP", on_click=self.emergency_stop, color="red").classes("font-bold")
                 ui.button("Resume After E-Stop", on_click=self.resume_from_estop, color="green")
 
@@ -1089,10 +547,7 @@ class FiveBarDashboard:
                     t_joint = ui.tab("Joint Control")
                     t_ik = ui.tab("Inverse Kinematics")
                     t_fk = ui.tab("Forward Kinematics")
-                    t_path = ui.tab("Path Planning")
-                    t_custom = ui.tab("Custom Trajectory")
-                    t_draw = ui.tab("Draw Path")
-                    t_teach = ui.tab("Teach By Hand")
+                    t_vel = ui.tab("Velocity Control")
                     t_cal = ui.tab("Calibration / Homing")
                     t_pid = ui.tab("PID Tuning")
                     t_cfg = ui.tab("Config")
@@ -1104,14 +559,8 @@ class FiveBarDashboard:
                         self.build_ik_tab()
                     with ui.tab_panel(t_fk):
                         self.build_fk_tab()
-                    with ui.tab_panel(t_path):
-                        self.build_path_tab()
-                    with ui.tab_panel(t_custom):
-                        self.build_custom_traj_tab()
-                    with ui.tab_panel(t_draw):
-                        self.build_draw_tab()
-                    with ui.tab_panel(t_teach):
-                        self.build_teach_tab()
+                    with ui.tab_panel(t_vel):
+                        self.build_velocity_tab()
                     with ui.tab_panel(t_cal):
                         self.build_cal_tab()
                     with ui.tab_panel(t_pid):
@@ -1119,7 +568,7 @@ class FiveBarDashboard:
                     with ui.tab_panel(t_cfg):
                         self.build_cfg_tab()
 
-            # ---------------- Right: visualization ----------------
+            # ---------------- Right: visualization + live telemetry ----------------
             with ui.column().classes("basis-2/3 items-center"):
                 ui.label("Live Linkage Visualization").classes("text-lg font-bold")
                 self.show_workspace_checkbox = ui.checkbox(
@@ -1127,6 +576,15 @@ class FiveBarDashboard:
                     on_change=self._on_toggle_workspace_overlay)
                 self.viz = ui.html(self.render_svg(None, None, None)).classes("border")
                 self.ee_label = ui.label("End effector: X=--  Y=--").classes("font-bold")
+
+                ui.label("Live Telemetry (last {:.0f}s)".format(self._telem_window_s)).classes(
+                    "text-lg font-bold mt-2")
+                self.chart_pos = ui.echart(self._telemetry_chart_options(
+                    "Position (deg)", "deg")).classes("w-full").style("height:180px")
+                self.chart_vel = ui.echart(self._telemetry_chart_options(
+                    "Velocity (deg/s)", "deg/s")).classes("w-full").style("height:180px")
+                self.chart_cur = ui.echart(self._telemetry_chart_options(
+                    "Motor current Iq (A)", "A")).classes("w-full").style("height:180px")
 
         # ---------------- Bottom: log ----------------
         ui.label("Log").classes("font-bold mt-2")
@@ -1136,14 +594,15 @@ class FiveBarDashboard:
             self.log(msg)
         self._startup_messages = []
 
-        # live polling timer (every 200 ms) - skipped while a trajectory is
-        # actively streaming, since the trajectory thread pushes its own
-        # higher-rate viz updates via _viz_queue instead.
+        # Idle live-pose poll (skipped while a move/velocity session is active,
+        # since those threads push their own higher-rate updates).
         ui.timer(0.2, self.poll_live)
-        # drains viz updates pushed by the background trajectory-streaming
-        # thread; runs on the main (UI) event loop so it's safe to touch
-        # NiceGUI elements here.
+        # Drains viz updates pushed by background motion threads.
         ui.timer(0.05, self._drain_viz_queue)
+        # Drains telemetry samples into the buffer and refreshes the charts.
+        ui.timer(0.1, self._drain_telemetry)
+        # Refreshes the velocity-control status line.
+        ui.timer(0.1, self._refresh_vel_status)
 
     async def _on_toggle_workspace_overlay(self):
         self.display_cfg["show_workspace"] = bool(self.show_workspace_checkbox.value)
@@ -1158,15 +617,22 @@ class FiveBarDashboard:
         self.viz.set_content(self.render_svg(None, None, None))
 
     def build_joint_tab(self):
-        ui.label("Move by joint angle (degrees) - trapezoidal-limited").classes("font-bold")
+        ui.label("Move by joint angle (degrees)").classes("font-bold")
+        ui.label(
+            "Uses the ODrive firmware trapezoidal trajectory planner "
+            "(INPUT_MODE_TRAP_TRAJ): the vel/accel limits from the Config tab "
+            "are written to trap_traj.config and the target is sent once - the "
+            "ODrive generates the profile. The two axes are time-synchronized "
+            "so they start and finish together."
+        ).classes("text-xs text-gray-500")
         self.theta1_input = ui.number(label="Theta1 (axis0)", value=0.0, format="%.2f")
         self.theta2_input = ui.number(label="Theta2 (axis1)", value=0.0, format="%.2f")
-        ui.button("Move Joints", on_click=self.move_joints_from_inputs).classes("w-full")
+        ui.button("Move Joints (trapezoidal)", on_click=self.move_joints_from_inputs).classes("w-full")
 
         ui.separator()
 
-        ui.label("Move by raw motor turns (instant, bypasses trajectory planning - "
-                 "use small increments only)").classes("font-bold")
+        ui.label("Move by raw motor turns (instant, bypasses the trajectory "
+                 "planner - use small increments only)").classes("font-bold")
         self.turns0_input = ui.number(label="Axis0 turns", value=0.0, format="%.4f")
         self.turns1_input = ui.number(label="Axis1 turns", value=0.0, format="%.4f")
         ui.button("Move Motors (raw turns)", on_click=self.move_raw_turns_from_inputs).classes("w-full")
@@ -1196,847 +662,82 @@ class FiveBarDashboard:
 
         self.fk_result_label = ui.label("X=--  Y=--")
 
-    def build_path_tab(self):
-        ui.label("Add Waypoints (end-effector X/Y, mm)").classes("font-bold")
-        self.path_x_input = ui.number(label="X", value=0.0, format="%.2f")
-        self.path_y_input = ui.number(label="Y", value=40.0, format="%.2f")
-        with ui.row().classes("w-full"):
-            ui.button("Add Waypoint", on_click=self.add_waypoint).classes("flex-1")
-            ui.button("Clear", on_click=self.clear_waypoints).classes("flex-1")
-
-        ui.separator()
-        ui.label("Waypoints (uses elbow settings from Inverse Kinematics tab)").classes("font-bold")
-        self.waypoints_container = ui.column().classes("w-full gap-1")
-        self._refresh_waypoints_list()
-
-        ui.separator()
-        ui.label("Uses Max Velocity / Max Acceleration from the Config tab "
-                 "(Trajectory Limits section). Each leg streams from a single "
-                 "background thread and does not pause until its waypoint is "
-                 "reached.").classes("text-xs text-gray-500")
-        with ui.row().classes("w-full"):
-            ui.button("Preview Path", on_click=self.preview_path).classes("flex-1")
-            ui.button("Run Path", on_click=self.run_path).classes("flex-1")
-        ui.button("Abort Motion", on_click=self.abort_motion, color="red").classes("w-full")
-
-    def build_custom_traj_tab(self):
-        ui.label("Custom Trajectory (position + arrival time)").classes("font-bold")
+    def build_velocity_tab(self):
+        ui.label("Velocity Control (real ODrive velocity mode + Jacobian)").classes("font-bold")
         ui.label(
-            "Normal use: just give each waypoint's end-effector X/Y and how "
-            "long after the previous waypoint it should get there - leave "
-            "'Auto-compute velocity' checked and the through-velocity at "
-            "every interior waypoint is estimated for you, so the arm "
-            "glides through the whole chain and only comes to rest at the "
-            "very last waypoint. Uncheck it for a specific waypoint only if "
-            "you need to PIN an exact velocity there yourself (e.g. "
-            "conveyor pick-ups: a waypoint just before the pick point with "
-            "Vx/Vy already matching the belt, then the pick-point waypoint "
-            "with the same velocity, so the arm arrives already moving with "
-            "it instead of accelerating into it)."
-        ).classes("text-xs text-gray-500")
+            "This puts the ODrive in CONTROL_MODE_VELOCITY_CONTROL and streams "
+            "controller.input_vel - it does NOT emulate position control with "
+            "discrete steps. While a session is active the ODrive hardware "
+            "watchdog is armed: if this PC stops feeding it (loop stall, USB "
+            "drop, app crash) the ODrive faults to IDLE within the watchdog "
+            "timeout instead of running the last velocity forever. Joint speed, "
+            "joint acceleration and proximity-to-singularity are all clamped "
+            "(see the Config tab, Velocity Control Safety). Support the arm the "
+            "first time you try this."
+        ).classes("text-xs text-orange-700")
 
         ui.separator()
-        ui.label("Conveyor Velocity Helper (for pinned/manual waypoints)").classes("font-bold")
-        self.conv_speed_input = ui.number(label="Conveyor speed (mm/s)", value=50.0, format="%.2f")
-        self.conv_angle_input = ui.number(label="Conveyor direction (deg, 0 = +X)", value=0.0, format="%.2f")
-        ui.button("Fill Vx/Vy Below From Conveyor", on_click=self.fill_conveyor_velocity).classes("w-full")
+        self.vel_submode_toggle = ui.toggle(
+            {"jog": "Cartesian velocity jog", "position": "PC-side position control"},
+            value="jog", on_change=self._on_vel_submode_change)
 
-        ui.separator()
-        ui.label("Add Waypoint").classes("font-bold")
-        self.ct_x_input = ui.number(label="X (mm)", value=0.0, format="%.2f")
-        self.ct_y_input = ui.number(label="Y (mm)", value=40.0, format="%.2f")
-        self.ct_duration_input = ui.number(label="Time from previous point (s)", value=1.0, format="%.3f")
-        self.ct_auto_vel_checkbox = ui.checkbox(
-            "Auto-compute velocity (recommended)", value=True,
-            on_change=self._on_toggle_ct_auto_vel)
-        with ui.row().classes("w-full") as self.ct_manual_vel_row:
-            self.ct_vx_input = ui.number(label="Vx (mm/s)", value=0.0, format="%.2f")
-            self.ct_vy_input = ui.number(label="Vy (mm/s)", value=0.0, format="%.2f")
-        self.ct_manual_vel_row.visible = False
         with ui.row().classes("w-full"):
-            ui.button("Add Waypoint", on_click=self.add_custom_waypoint).classes("flex-1")
-            ui.button("Clear", on_click=self.clear_custom_waypoints).classes("flex-1")
+            self.vel_start_btn = ui.button("Start Velocity Control", color="primary",
+                                           on_click=self.start_velocity_control).classes("flex-1")
+            self.vel_stop_btn = ui.button("Stop (hold position)", color="orange",
+                                          on_click=self.stop_velocity_control).classes("flex-1")
 
-        ui.separator()
-        ui.label("Waypoints (uses elbow settings from Inverse Kinematics tab)").classes("font-bold")
-        self.custom_waypoints_container = ui.column().classes("w-full gap-1")
-        self._refresh_custom_waypoints_list()
+        self.vel_status_label = ui.label("Velocity control: idle").classes(
+            "text-sm font-bold text-gray-500")
 
-        ui.separator()
-        ui.label(
-            "Preview checks the resulting joint velocity/acceleration against "
-            "the Config tab's Trajectory Limits and logs a warning (not a "
-            "hard block, since matching a real conveyor may legitimately need "
-            "more speed than a generic default) if a segment would exceed "
-            "them."
-        ).classes("text-xs text-gray-500")
-        with ui.row().classes("w-full"):
-            ui.button("Preview Custom Path", on_click=self.preview_custom_path).classes("flex-1")
-            ui.button("Run Custom Trajectory", on_click=self.run_custom_trajectory).classes("flex-1")
-        ui.button("Abort Motion", on_click=self.abort_motion, color="red").classes("w-full")
-
-    # ------------------------------------------------------------------
-    # Draw Path tab: sketch an end-effector path with the mouse
-    # ------------------------------------------------------------------
-    def build_draw_tab(self):
-        ui.label("Draw a path with the mouse").classes("font-bold")
-        ui.label(
-            "Click-drag across the picture below to sketch an end-effector "
-            "path in the same coordinate space as the live visualization "
-            "(base line horizontal, same scale). Release the mouse to "
-            "finish a stroke."
-        ).classes("text-xs text-gray-500")
-
-        self._draw_dragging = False
-        self._draw_points_px = []
-        self._drawn_path_mm = []
-        self._curvature_plan = None
-
-        ui.label("Motion mode").classes("font-bold")
-        ui.label(
-            "Waypoint Hermite Chain: the sketch is reduced to a handful of "
-            "waypoints, each given a through-velocity, and blended with "
-            "cubic Hermite curves (same engine Path Planning/Custom "
-            "Trajectory use). Curvature-Limited Path Timing: the sketch is "
-            "kept as one dense geometric path with NO waypoint velocities "
-            "at all - instead a separate speed-vs-distance law is computed "
-            "from real physical limits (a speed cap, an accel/decel cap, "
-            "and a cornering-speed cap derived from how tightly the path "
-            "actually curves). Switch modes and re-run the same sketch to "
-            "compare them directly."
-        ).classes("text-xs text-gray-500")
-        self.draw_mode_toggle = ui.toggle(
-            {"hermite": "Waypoint Hermite Chain", "curvature": "Curvature-Limited Path Timing"},
-            value="hermite", on_change=self._on_draw_mode_change,
-        )
-
-        with ui.column().classes("w-full") as self.draw_hermite_controls:
-            self.draw_speed_input = ui.number(label="Target speed (mm/s)", value=40.0, format="%.1f")
-
-            ui.label("Sketch resolution (max waypoints)").classes("text-sm")
+        # ---------------- Jog sub-panel ----------------
+        self.vel_jog_panel = ui.column().classes("w-full")
+        with self.vel_jog_panel:
+            ui.separator()
+            ui.label("Cartesian velocity jog (end-effector frame, mm/s)").classes("font-bold")
+            self.jog_speed_input = ui.number(label="Jog speed (mm/s)", value=30.0, format="%.1f")
+            with ui.row().classes("w-full items-center justify-center gap-1"):
+                ui.button("+Y", on_click=lambda: self.jog_dir(0.0, 1.0)).props("dense").classes("w-16")
+            with ui.row().classes("w-full items-center justify-center gap-1"):
+                ui.button("-X", on_click=lambda: self.jog_dir(-1.0, 0.0)).props("dense").classes("w-16")
+                ui.button("STOP", color="red",
+                          on_click=self.jog_stop).props("dense").classes("w-16")
+                ui.button("+X", on_click=lambda: self.jog_dir(1.0, 0.0)).props("dense").classes("w-16")
+            with ui.row().classes("w-full items-center justify-center gap-1"):
+                ui.button("-Y", on_click=lambda: self.jog_dir(0.0, -1.0)).props("dense").classes("w-16")
             ui.label(
-                "Higher = the sketch is cut into more waypoints, so a "
-                "smooth curve keeps smaller facet angles between them and "
-                "holds speed better through gentle bends."
+                "Buttons set an end-effector velocity vector. Because of the "
+                "deadman, the arm keeps moving only while you re-press within "
+                "the deadman timeout; press STOP (or release) to zero it. You "
+                "can also type an explicit vector:"
             ).classes("text-xs text-gray-500")
-            self.draw_max_waypoints_slider = ui.slider(min=10, max=150, step=5, value=60).props("label-always")
+            with ui.row().classes("w-full"):
+                self.jog_vx_input = ui.number(label="Vx (mm/s)", value=0.0, format="%.1f").classes("flex-1")
+                self.jog_vy_input = ui.number(label="Vy (mm/s)", value=0.0, format="%.1f").classes("flex-1")
+            ui.button("Apply velocity vector", on_click=self.apply_jog_from_inputs).classes("w-full")
 
-            ui.label("Sketch smoothing (tremor removal)").classes("text-sm")
+        # ---------------- Position-control sub-panel ----------------
+        self.vel_pos_panel = ui.column().classes("w-full")
+        with self.vel_pos_panel:
+            ui.separator()
+            ui.label("PC-side Cartesian position control").classes("font-bold")
             ui.label(
-                "Higher removes more hand tremor/jitter before the sketch "
-                "is turned into waypoints, at the cost of rounding off "
-                "sharp corners you drew on purpose."
+                "The position loop runs HERE, on the PC: it reads the live "
+                "end-effector pose (encoders -> forward kinematics), computes "
+                "the Cartesian error to the target, applies a proportional gain "
+                "to get a desired Cartesian velocity (capped), resolves it "
+                "through the inverse Jacobian and streams input_vel. Gains, "
+                "caps and tolerance are on the Config tab."
             ).classes("text-xs text-gray-500")
-            self.draw_smooth_window_slider = ui.slider(min=1, max=21, step=2, value=7).props("label-always")
-
-        with ui.column().classes("w-full") as self.draw_curvature_controls:
-            ui.label("Max speed (mm/s)").classes("text-sm")
-            self.draw_cart_vmax_slider = ui.slider(
-                min=5, max=300, step=5, value=80, on_change=self._recompute_curvature_profile
-            ).props("label-always")
-
-            ui.label("Max tangential accel/decel (mm/s^2)").classes("text-sm")
-            self.draw_cart_amax_slider = ui.slider(
-                min=50, max=3000, step=50, value=400, on_change=self._recompute_curvature_profile
-            ).props("label-always")
-
-            ui.label("Max cornering (lateral) accel (mm/s^2)").classes("text-sm")
-            ui.label(
-                "This is the key tuning knob: lower = the path slows down "
-                "more through tight curves (safer, more accurate through "
-                "corners); higher = it holds speed through curves more "
-                "aggressively. Straight sections are unaffected either way."
-            ).classes("text-xs text-gray-500")
-            self.draw_lateral_amax_slider = ui.slider(
-                min=10, max=2000, step=10, value=200, on_change=self._recompute_curvature_profile
-            ).props("label-always")
-
-            ui.label(
-                "Note: these three limits are all in Cartesian (end-effector) "
-                "space, not joint space. Before running, the plan is safety- "
-                "checked against the Config tab's joint velocity limit (via "
-                "the current Jacobian) and scaled down globally if needed - "
-                "watch the log for a warning if that happens."
-            ).classes("text-xs text-gray-500")
-
-            self.draw_profile_label = ui.label("No sketch yet.").classes("text-xs text-gray-600")
-            self.draw_profile_svg = ui.html("")
-
-        self.draw_curvature_controls.visible = False
-
-        self.draw_image = ui.interactive_image(
-            source=self._draw_bg_data_uri(),
-            on_mouse=self._on_draw_mouse,
-            events=["mousedown", "mousemove", "mouseup"],
-            cross=False,
-        ).classes("border")
-        self.draw_status_label = ui.label("No sketch yet.").classes("text-sm text-gray-600")
-
-        with ui.row().classes("w-full"):
-            ui.button("Clear Sketch", on_click=self.clear_drawn_path).classes("flex-1")
-            ui.button("Send To Path Planning", on_click=self.send_drawn_path_to_planning).classes("flex-1")
-            ui.button("Run Drawn Path Now", on_click=self.run_drawn_path).classes("flex-1")
-        ui.button("Abort Motion", on_click=self.abort_motion, color="red").classes("w-full")
-
-    def _draw_bg_data_uri(self):
-        """A plain background (base line + reachable-workspace annulus, no
-        linkage) at the same size/scale/convention as render_svg(), so
-        pixel coordinates clicked on it map onto the same mm coordinates
-        the rest of the dashboard uses."""
-        svg = self.render_svg(None, None, None)
-        b64 = base64.b64encode(svg.encode("utf-8")).decode("ascii")
-        return "data:image/svg+xml;base64,{}".format(b64)
-
-    def _draw_px_to_mm(self, px, py):
-        """Inverse of render_svg()'s to_px(): pixel -> (x, y) mm."""
-        w, h = 640, 520
-        cx, cy = w / 2, h * 0.8
-        scale = 0.5
-        x = (px - cx) / scale
-        y = (cy - py) / scale
-        return x, y
-
-    def _on_draw_mouse(self, e):
-        try:
-            evt_type = e.type
-            px, py = e.image_x, e.image_y
-        except AttributeError:
-            return
-        if evt_type == "mousedown":
-            self._draw_dragging = True
-            self._draw_points_px = [(px, py)]
-        elif evt_type == "mousemove" and self._draw_dragging:
-            if self._draw_points_px:
-                lx, ly = self._draw_points_px[-1]
-                if math.hypot(px - lx, py - ly) < 4:
-                    return
-            self._draw_points_px.append((px, py))
-            self._refresh_draw_preview()
-        elif evt_type == "mouseup":
-            self._draw_dragging = False
-            self._finalize_drawn_path()
-
-    def _refresh_draw_preview(self):
-        pts_mm = [self._draw_px_to_mm(px, py) for px, py in self._draw_points_px]
-        self.waypoints_viz = pts_mm[::4] if len(pts_mm) > 8 else pts_mm
-        self.planned_path = pts_mm
-        self.velocity_viz = []
-        self.viz.set_content(self.render_svg(None, None, None))
-
-    def _finalize_drawn_path(self):
-        if len(self._draw_points_px) < 2:
-            self.draw_status_label.text = "Sketch too short - try dragging a longer stroke."
-            return
-        raw_mm = [self._draw_px_to_mm(px, py) for px, py in self._draw_points_px]
-        try:
-            window = int(self.draw_smooth_window_slider.value)
-        except (TypeError, ValueError):
-            window = 7
-        try:
-            max_wp = int(self.draw_max_waypoints_slider.value)
-        except (TypeError, ValueError):
-            max_wp = 60
-        smoothed_mm = smooth_polyline(raw_mm, window=window)
-        # More points = smaller facet angle between consecutive legs, which
-        # matters a lot here: a smooth hand-drawn curve chopped into too
-        # few waypoints looks like a series of small corners to the
-        # corner-aware velocity estimator, which then (correctly, given a
-        # faceted polyline) slows down at each one - even though the
-        # original sketch had no real corner there.
-        n_out = max(6, min(max_wp, len(smoothed_mm) // 2))
-        resampled = resample_polyline(smoothed_mm, n_out)
-
-        params = self._current_ik_params()
-        reachable = []
-        skipped = 0
-        for x, y in resampled:
-            try:
-                inverse_kinematics(x, y, params)
-                reachable.append((x, y))
-            except Exception:
-                skipped += 1
-        self._drawn_path_mm = reachable
-
-        self.waypoints_viz = reachable
-        self.planned_path = reachable
-        self.velocity_viz = []
-        self.viz.set_content(self.render_svg(None, None, None))
-
-        if skipped:
-            self.draw_status_label.text = (
-                "Sketch captured: {} reachable waypoint(s), {} point(s) outside the "
-                "workspace were dropped.".format(len(reachable), skipped))
-        else:
-            self.draw_status_label.text = "Sketch captured: {} waypoint(s).".format(len(reachable))
-
-        self._recompute_curvature_profile()
-
-    def clear_drawn_path(self):
-        self._draw_points_px = []
-        self._drawn_path_mm = []
-        self._curvature_plan = None
-        self.waypoints_viz = []
-        self.planned_path = []
-        self.velocity_viz = []
-        self.viz.set_content(self.render_svg(None, None, None))
-        self.draw_status_label.text = "No sketch yet."
-        if hasattr(self, "draw_profile_label"):
-            self.draw_profile_label.text = "No sketch yet."
-            self.draw_profile_svg.set_content("")
-        self.log("Drawn path cleared.")
-
-    def _on_draw_mode_change(self):
-        is_curv = self.draw_mode_toggle.value == "curvature"
-        self.draw_hermite_controls.visible = not is_curv
-        self.draw_curvature_controls.visible = is_curv
-        if is_curv:
-            self._recompute_curvature_profile()
-
-    def _render_speed_profile_svg(self, s_list, v_list):
-        """A small SVG line chart of planned speed vs. cumulative arc
-        length - lets the person see the effect of the lateral-accel
-        (cornering) slider directly instead of just guessing from watching
-        the arm move."""
-        w, h = 620, 140
-        pad_l, pad_b, pad_t, pad_r = 40, 20, 12, 10
-        total_s = max(s_list[-1], 1e-6)
-        max_v = max(max(v_list), 1e-6)
-
-        def to_px(s, v):
-            x = pad_l + (s / total_s) * (w - pad_l - pad_r)
-            y = (h - pad_b) - (v / max_v) * (h - pad_b - pad_t)
-            return x, y
-
-        pts_px = [to_px(s, v) for s, v in zip(s_list, v_list)]
-        path_d = "M " + " L ".join("{:.1f},{:.1f}".format(x, y) for x, y in pts_px)
-        return (
-            '<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg" '
-            'style="background:#111827;border-radius:4px">'
-            '<line x1="{pl}" y1="{h0}" x2="{w0}" y2="{h0}" stroke="#4b5563" stroke-width="1"/>'
-            '<line x1="{pl}" y1="{pt}" x2="{pl}" y2="{h0}" stroke="#4b5563" stroke-width="1"/>'
-            '<path d="{d}" fill="none" stroke="#34d399" stroke-width="2"/>'
-            '<text x="4" y="14" fill="#9ca3af" font-size="10">{maxv:.0f} mm/s</text>'
-            '<text x="{w0}" y="{h}" fill="#9ca3af" font-size="10" text-anchor="end">{tots:.0f} mm</text>'
-            "</svg>"
-        ).format(w=w, h=h, pl=pad_l, pt=pad_t, h0=h - pad_b, w0=w - pad_r,
-                  d=path_d, maxv=max_v, tots=total_s)
-
-    def _recompute_curvature_profile(self):
-        """Recomputes the curvature-limited speed plan from the current
-        sketch + sliders and refreshes the speed-vs-distance chart. Cheap
-        (no hardware access) so it's safe to call on every slider tweak."""
-        if len(self._drawn_path_mm) < 2:
-            self._curvature_plan = None
-            if hasattr(self, "draw_profile_label"):
-                self.draw_profile_label.text = "No sketch yet."
-                self.draw_profile_svg.set_content("")
-            return
-        try:
-            vmax = max(1.0, float(self.draw_cart_vmax_slider.value))
-            amax = max(1.0, float(self.draw_cart_amax_slider.value))
-            lat_amax = max(1.0, float(self.draw_lateral_amax_slider.value))
-        except (TypeError, ValueError):
-            return
-
-        points = list(self._drawn_path_mm)
-        s_list, v_list = plan_curvature_limited_speed(points, vmax, amax, lat_amax)
-        T_list, accels = integrate_path_timing(s_list, v_list)
-        self._curvature_plan = {
-            "points": points, "s_list": s_list, "v_list": v_list,
-            "T_list": T_list, "accels": accels,
-        }
-        self.draw_profile_label.text = "Length: {:.1f} mm, time: {:.2f} s, peak speed: {:.1f} mm/s.".format(
-            s_list[-1], T_list[-1], max(v_list))
-        self.draw_profile_svg.set_content(self._render_speed_profile_svg(s_list, v_list))
-
-    def send_drawn_path_to_planning(self):
-        if len(self._drawn_path_mm) < 1:
-            ui.notify("Draw a path first.", type="warning")
-            return
-        self.waypoints = [{"x": x, "y": y} for x, y in self._drawn_path_mm]
-        self._refresh_waypoints_list()
-        self.waypoints_viz = list(self._drawn_path_mm)
-        self.log("Sent {} waypoint(s) from the drawn sketch to Path Planning.".format(
-            len(self._drawn_path_mm)))
-        ui.notify("Sent to Path Planning tab.", type="positive")
-
-    async def run_drawn_path(self):
-        if not await self.require_closed_loop():
-            return
-        if len(self._drawn_path_mm) < 1:
-            ui.notify("Draw a path first.", type="warning")
-            return
-
-        if self.draw_mode_toggle.value == "curvature":
-            await self._run_drawn_path_curvature()
-        else:
-            await self._run_drawn_path_hermite()
-
-    async def _run_drawn_path_hermite(self):
-        try:
-            speed = max(1.0, float(self.draw_speed_input.value))
-        except (TypeError, ValueError):
-            speed = 40.0
-
-        params = self._current_ik_params()
-        try:
-            joint_positions = [inverse_kinematics(x, y, params) for x, y in self._drawn_path_mm]
-        except Exception as e:
-            ui.notify("Drawn path error: {}".format(e), type="negative")
-            return
-
-        try:
-            t1_cur, t2_cur = await self._get_current_joint_deg()
-        except Exception as e:
-            self.log("Could not read current position, aborting drawn path: {}".format(e))
-            return
-
-        chain = [(t1_cur, t2_cur)] + joint_positions
-        # Duration per leg = Cartesian distance / target speed (simple,
-        # since the person picked a speed rather than per-waypoint timing).
-        cart_chain = [self._current_ee_xy_estimate(t1_cur, t2_cur)] + list(self._drawn_path_mm)
-        durations = []
-        for (x0, y0), (x1, y1) in zip(cart_chain, cart_chain[1:]):
-            d = math.hypot(x1 - x0, y1 - y0)
-            durations.append(max(0.05, d / speed))
-
-        vmax = self.traj_cfg["max_vel_deg_s"]
-        amax = self.traj_cfg["max_accel_deg_s2"]
-        segments = build_hermite_chain(chain, durations, vmax, amax)
-
-        self.planned_path = self._sample_custom_segments_for_viz(segments)
-        self.waypoints_viz = list(self._drawn_path_mm)
-        self.velocity_viz = []
-
-        self.log("Running drawn path [Waypoint Hermite Chain]: {} waypoint(s) at ~{:.1f} mm/s "
-                  "target speed...".format(len(self._drawn_path_mm), speed))
-        await self._launch_motion_task(self._stream_custom_trajectory(segments))
-
-    async def _run_drawn_path_curvature(self):
-        try:
-            vmax = max(1.0, float(self.draw_cart_vmax_slider.value))
-            amax = max(1.0, float(self.draw_cart_amax_slider.value))
-            lat_amax = max(1.0, float(self.draw_lateral_amax_slider.value))
-        except (TypeError, ValueError):
-            ui.notify("Curvature-mode sliders must be numbers.", type="negative")
-            return
-
-        try:
-            t1_cur, t2_cur = await self._get_current_joint_deg()
-        except Exception as e:
-            self.log("Could not read current position, aborting drawn path: {}".format(e))
-            return
-
-        cur_xy = self._current_ee_xy_estimate(t1_cur, t2_cur)
-        points = [cur_xy] + list(self._drawn_path_mm)
-
-        s_list, v_list = plan_curvature_limited_speed(points, vmax, amax, lat_amax)
-        v_list, safety_ratio = self._clamp_cartesian_plan_to_joint_limits(points, v_list)
-        if safety_ratio > 1.0:
-            self.log("WARNING: curvature-mode speed plan scaled down {:.0f}% to stay within the "
-                      "Config tab's joint velocity limit (a Jacobian near-singularity was the "
-                      "binding constraint somewhere along the path).".format((safety_ratio - 1.0) * 100))
-        T_list, accels = integrate_path_timing(s_list, v_list)
-
-        self._curvature_plan = {
-            "points": points, "s_list": s_list, "v_list": v_list,
-            "T_list": T_list, "accels": accels,
-        }
-        self.draw_profile_label.text = "Length: {:.1f} mm, time: {:.2f} s, peak speed: {:.1f} mm/s.".format(
-            s_list[-1], T_list[-1], max(v_list))
-        self.draw_profile_svg.set_content(self._render_speed_profile_svg(s_list, v_list))
-
-        self.waypoints_viz = list(self._drawn_path_mm)
-        self.planned_path = points
-        self.velocity_viz = []
-
-        self.log("Running drawn path [Curvature-Limited Path Timing]: {:.1f} mm over {:.2f}s "
-                  "(peak {:.1f} mm/s)...".format(s_list[-1], T_list[-1], max(v_list)))
-        await self._launch_motion_task(
-            self._stream_curvature_path(points, s_list, T_list, v_list, accels))
-
-    def _clamp_cartesian_plan_to_joint_limits(self, points, v_list):
-        """Safety net: the curvature-limited planner works entirely in
-        Cartesian space, but the arm is ultimately joint-limited, and the
-        Jacobian relating the two isn't constant across the workspace (it
-        can blow up near a kinematic singularity). This checks the implied
-        joint speed at every planned point against the Config tab's joint
-        velocity limit and, if anything would exceed it, scales the WHOLE
-        speed profile down uniformly by the worst offender's ratio (simple
-        and conservative, same pattern used elsewhere in this file).
-        Returns (possibly-scaled v_list, worst_ratio) - worst_ratio > 1.0
-        means scaling was applied."""
-        params = self._current_ik_params()
-        vmax_joint = max(1e-6, self.traj_cfg["max_vel_deg_s"])
-        n = len(points)
-        worst_ratio = 1.0
-        for i in range(n):
-            if v_list[i] <= 1e-6:
-                continue
-            i0, i1 = max(0, i - 1), min(n - 1, i + 1)
-            dx = points[i1][0] - points[i0][0]
-            dy = points[i1][1] - points[i0][1]
-            d = math.hypot(dx, dy)
-            if d <= 1e-9:
-                continue
-            vx = v_list[i] * dx / d
-            vy = v_list[i] * dy / d
-            try:
-                J = numerical_jacobian(points[i][0], points[i][1], params)
-                w1, w2 = joint_velocity_from_cartesian(J, vx, vy)
-            except Exception:
-                continue
-            mag = max(abs(w1), abs(w2))
-            if mag > 1e-6:
-                worst_ratio = max(worst_ratio, mag / vmax_joint)
-        if worst_ratio > 1.0:
-            scale = 1.0 / worst_ratio
-            v_list = [v * scale for v in v_list]
-        return v_list, worst_ratio
-
-    def _stream_curvature_path_blocking(self, points, s_list, T_list, v_list, accels, stop_event):
-        total_T = T_list[-1]
-        if total_T <= 0:
-            return "Curvature-limited path: zero duration."
-        rate = max(1.0, self.traj_cfg["control_rate_hz"])
-        dt = 1.0 / rate
-        steps = max(1, int(math.ceil(total_T / dt)))
-        start_perf = time.perf_counter()
-        idx = 0
-        params = self._current_ik_params()
-
-        for i in range(steps + 1):
-            if stop_event.is_set():
-                return "Curvature-limited path replay cancelled."
-            t_elapsed = min(i * dt, total_T)
-            (x, y), idx = sample_curvature_path(t_elapsed, points, s_list, T_list, v_list, accels, start_idx=idx)
-            try:
-                t1, t2 = inverse_kinematics(x, y, params)
-            except Exception as e:
-                return "Curvature-limited path IK failure, aborting: {}".format(e)
-            turns0 = self.joint_deg_to_turns(0, t1)
-            turns1 = self.joint_deg_to_turns(1, t2)
-
-            try:
-                with self._odrv_lock:
-                    self.odrv0.axis0.controller.input_pos = turns0
-                    self.odrv0.axis1.controller.input_pos = turns1
-            except Exception as e:
-                return "Curvature-limited path write failed, aborting: {}".format(e)
-
-            try:
-                E, P1, P2 = forward_kinematics(t1, t2, self.params)
-                self._push_viz_update(P1, P2, E, t1, t2)
-            except Exception:
-                pass
-
-            if t_elapsed >= total_T:
-                break
-            next_deadline = start_perf + (i + 1) * dt
-            sleep_for = next_deadline - time.perf_counter()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-
-        return "Curvature-limited path replay complete."
-
-    async def _stream_curvature_path(self, points, s_list, T_list, v_list, accels):
-        self.log("Streaming curvature-limited path ({} point(s), continuous speed-vs-distance "
-                  "law - only stops at the very start and end)...".format(len(points)))
-        self._motion_active = True
-        self._motion_stop_event.clear()
-        try:
-            msg = await run.io_bound(
-                self._stream_curvature_path_blocking, points, s_list, T_list, v_list, accels,
-                self._motion_stop_event)
-            self.log(msg)
-        finally:
-            self._motion_active = False
-
-    def _current_ee_xy_estimate(self, t1, t2):
-        try:
-            E, _, _ = forward_kinematics(t1, t2, self.params)
-            return E
-        except Exception:
-            return self._drawn_path_mm[0] if self._drawn_path_mm else (0.0, 0.0)
-
-    # ------------------------------------------------------------------
-    # Teach By Hand tab: record end-effector motion by backdriving the
-    # arm, then replay it exactly as recorded.
-    # ------------------------------------------------------------------
-    def build_teach_tab(self):
-        ui.label("Teach by hand").classes("font-bold")
-        ui.label(
-            "Start Recording sets both axes IDLE (unpowered / backdrivable) "
-            "and samples both position AND the ODrive's own velocity "
-            "estimate while you move the end effector by hand. Stop "
-            "Recording keeps the motion in memory as a taught trajectory. "
-            "Replay Hermite-blends between the recorded samples using "
-            "their captured velocities (scaled by the speed multiplier "
-            "below), so it reproduces the human motion's own speed and "
-            "smoothness rather than just linearly connecting positions. "
-            "You'll need 'Resume After E-Stop' (axes are left IDLE after "
-            "recording) before Replay will move."
-        ).classes("text-xs text-gray-500")
-
-        self.teach_status_label = ui.label("Not recording.").classes("font-bold")
-        with ui.row().classes("w-full"):
-            ui.button("Start Recording", on_click=self.start_teach_recording).classes("flex-1")
-            ui.button("Stop Recording", on_click=self.stop_teach_recording).classes("flex-1")
-
-        self.teach_info_label = ui.label("No taught trajectory yet.")
-        self.teach_speed_input = ui.number(label="Replay speed multiplier", value=1.0, format="%.2f")
-        with ui.row().classes("w-full"):
-            ui.button("Replay Taught Trajectory", on_click=self.replay_taught_trajectory).classes("flex-1")
-        with ui.row().classes("w-full"):
-            ui.button("Save To File", on_click=self.save_taught_trajectory).classes("flex-1")
-            ui.button("Load From File", on_click=self.load_taught_trajectory).classes("flex-1")
-        ui.button("Abort Motion", on_click=self.abort_motion, color="red").classes("w-full")
-
-    def _teach_record_blocking(self, stop_event, sample_hz):
-        """Runs in a worker thread: puts both axes IDLE, then samples both
-        encoder position AND the ODrive's own velocity estimate at
-        sample_hz until stop_event is set, returning the list of
-        (t_elapsed_s, t1_deg, t2_deg, w1_deg_s, w2_deg_s) samples.
-        Capturing velocity directly (rather than only differentiating
-        recorded positions later) gives Replay a cleaner signal to build a
-        smooth Hermite blend from."""
-        with self._odrv_lock:
-            self.odrv0.axis0.requested_state = AXIS_STATE_IDLE
-            self.odrv0.axis1.requested_state = AXIS_STATE_IDLE
-
-        dt = 1.0 / max(1.0, sample_hz)
-        samples = []
-        start = time.perf_counter()
-        while not stop_event.is_set():
-            tick_start = time.perf_counter()
-            try:
-                with self._odrv_lock:
-                    turns0 = self.odrv0.axis0.encoder.pos_estimate
-                    turns1 = self.odrv0.axis1.encoder.pos_estimate
-                    vel_turns0 = self.odrv0.axis0.encoder.vel_estimate
-                    vel_turns1 = self.odrv0.axis1.encoder.vel_estimate
-            except Exception:
-                break
-            t1 = self.turns_to_joint_deg(0, turns0)
-            t2 = self.turns_to_joint_deg(1, turns1)
-            w1 = self.turns_vel_to_joint_deg_vel(0, vel_turns0)
-            w2 = self.turns_vel_to_joint_deg_vel(1, vel_turns1)
-            samples.append((time.perf_counter() - start, t1, t2, w1, w2))
-            try:
-                E, P1, P2 = forward_kinematics(t1, t2, self.params)
-                self._push_viz_update(P1, P2, E, t1, t2)
-            except Exception:
-                pass
-            elapsed = time.perf_counter() - tick_start
-            sleep_for = dt - elapsed
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-        return samples
-
-    async def start_teach_recording(self):
-        if not self.require_connected():
-            return
-        if self._teach_recording:
-            ui.notify("Already recording.", type="warning")
-            return
-        self._teach_stop_event.clear()
-        self._teach_recording = True
-        self.teach_status_label.text = "Recording... move the end effector by hand now."
-        self.log("Teach: axes set IDLE, recording started - move the arm by hand.")
-        self._teach_task = asyncio.create_task(
-            run.io_bound(self._teach_record_blocking, self._teach_stop_event, 50.0))
-
-    async def stop_teach_recording(self):
-        if not self._teach_recording or self._teach_task is None:
-            ui.notify("Not currently recording.", type="warning")
-            return
-        self._teach_stop_event.set()
-        try:
-            samples = await self._teach_task
-        except Exception as e:
-            self.log("Teach recording failed: {}".format(e))
-            samples = []
-        self._teach_recording = False
-        self._teach_task = None
-        self.taught_trajectory = samples
-        if samples:
-            total_t = samples[-1][0]
-            self.teach_status_label.text = "Stopped. Captured {:.1f}s, {} sample(s).".format(
-                total_t, len(samples))
-            self.teach_info_label.text = "Taught trajectory: {:.1f}s, {} sample(s) (in memory).".format(
-                total_t, len(samples))
-            self.log("Teach: recording stopped, {} sample(s) over {:.1f}s captured. Axes are IDLE - "
-                      "press 'Resume After E-Stop' before Replay.".format(len(samples), total_t))
-        else:
-            self.teach_status_label.text = "Stopped. No samples captured."
-        self.waypoints_viz = []
-        try:
-            pts = []
-            for _, t1, t2, _, _ in samples:
-                E, _, _ = forward_kinematics(t1, t2, self.params)
-                pts.append(E)
-            self.planned_path = pts
-            self.viz.set_content(self.render_svg(None, None, None))
-        except Exception:
-            pass
-
-    def _stream_recorded_trajectory_blocking(self, samples, speed, stop_event):
-        """Deadline-scheduled playback of the recorded (t_elapsed, t1, t2,
-        w1, w2) samples, Hermite-blended between each consecutive pair
-        using their captured velocities (rather than plain linear
-        interpolation, which would ignore how fast the hand was actually
-        moving through each sample and can look faceted between widely
-        spaced samples), time-scaled by `speed` (>1 = faster than
-        recorded, <1 = slower - velocities are scaled right along with
-        time so the same path is still covered)."""
-        if len(samples) < 2:
-            return "Taught trajectory: not enough samples to replay."
-        rate = max(1.0, self.traj_cfg["control_rate_hz"])
-        dt = 1.0 / rate
-        speed = max(1e-6, speed)
-        total_T = samples[-1][0] / speed
-        if total_T <= 0:
-            return "Taught trajectory: zero duration."
-
-        # Playing back at `speed`x compresses/stretches time by 1/speed, so
-        # velocities (a rate) scale by `speed` to still cover the same path.
-        scaled = [(t / speed, t1, t2, w1 * speed, w2 * speed) for (t, t1, t2, w1, w2) in samples]
-        steps = max(1, int(math.ceil(total_T / dt)))
-        start_perf = time.perf_counter()
-        idx = 0
-
-        for i in range(steps + 1):
-            if stop_event.is_set():
-                return "Taught trajectory replay cancelled."
-            t_elapsed = min(i * dt, total_T)
-
-            while idx < len(scaled) - 2 and scaled[idx + 1][0] <= t_elapsed:
-                idx += 1
-            t0s, t1a, t2a, w1a, w2a = scaled[idx]
-            t1s, t1b, t2b, w1b, w2b = scaled[min(idx + 1, len(scaled) - 1)]
-            span = t1s - t0s
-            if span <= 1e-9:
-                t1, t2 = t1a, t2a
-            else:
-                local_t = max(0.0, min(span, t_elapsed - t0s))
-                t1 = hermite_pos(t1a, w1a, t1b, w1b, span, local_t)
-                t2 = hermite_pos(t2a, w2a, t2b, w2b, span, local_t)
-            turns0 = self.joint_deg_to_turns(0, t1)
-            turns1 = self.joint_deg_to_turns(1, t2)
-
-            try:
-                with self._odrv_lock:
-                    self.odrv0.axis0.controller.input_pos = turns0
-                    self.odrv0.axis1.controller.input_pos = turns1
-            except Exception as e:
-                return "Taught trajectory write failed, aborting: {}".format(e)
-
-            try:
-                E, P1, P2 = forward_kinematics(t1, t2, self.params)
-                self._push_viz_update(P1, P2, E, t1, t2)
-            except Exception:
-                pass
-
-            if t_elapsed >= total_T:
-                break
-            next_deadline = start_perf + (i + 1) * dt
-            sleep_for = next_deadline - time.perf_counter()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-
-        return "Taught trajectory replay complete."
-
-    async def replay_taught_trajectory(self):
-        if not await self.require_closed_loop():
-            return
-        if len(self.taught_trajectory) < 2:
-            ui.notify("No taught trajectory to replay - record one first.", type="warning")
-            return
-        try:
-            speed = float(self.teach_speed_input.value)
-            if speed <= 0:
-                raise ValueError
-        except (TypeError, ValueError):
-            speed = 1.0
-
-        async def _run():
-            self._motion_active = True
-            self._motion_stop_event.clear()
-            try:
-                msg = await run.io_bound(
-                    self._stream_recorded_trajectory_blocking,
-                    self.taught_trajectory, speed, self._motion_stop_event)
-                self.log(msg)
-            finally:
-                self._motion_active = False
-
-        self.log("Replaying taught trajectory ({} sample(s), {:.2f}x speed)...".format(
-            len(self.taught_trajectory), speed))
-        await self._launch_motion_task(_run())
-
-    def save_taught_trajectory(self):
-        if len(self.taught_trajectory) < 2:
-            ui.notify("No taught trajectory to save.", type="warning")
-            return
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), TAUGHT_TRAJECTORY_FILENAME)
-        try:
-            with open(path, "w") as f:
-                json.dump({"samples": self.taught_trajectory}, f)
-            self.log("Taught trajectory saved to {}.".format(path))
-            ui.notify("Saved.", type="positive")
-        except Exception as e:
-            self.log("Failed to save taught trajectory: {}".format(e))
-            ui.notify("Save failed: {}".format(e), type="negative")
-
-    @staticmethod
-    def _estimate_velocities_from_positions(pos_samples):
-        """Backward-compat helper: given (t, t1, t2) samples with no
-        recorded velocity, estimates w1/w2 via a central difference of
-        neighboring samples, so older saved taught trajectories (from
-        before velocity capture was added) still replay smoothly."""
-        n = len(pos_samples)
-        out = []
-        for i in range(n):
-            t, t1, t2 = pos_samples[i]
-            if i == 0 or i == n - 1:
-                w1 = w2 = 0.0
-            else:
-                t_prev = pos_samples[i - 1][0]
-                t_next = pos_samples[i + 1][0]
-                span = t_next - t_prev
-                if span <= 1e-9:
-                    w1 = w2 = 0.0
-                else:
-                    w1 = (pos_samples[i + 1][1] - pos_samples[i - 1][1]) / span
-                    w2 = (pos_samples[i + 1][2] - pos_samples[i - 1][2]) / span
-            out.append((t, t1, t2, w1, w2))
-        return out
-
-    def load_taught_trajectory(self):
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), TAUGHT_TRAJECTORY_FILENAME)
-        if not os.path.exists(path):
-            ui.notify("No saved taught trajectory found at {}.".format(path), type="warning")
-            return
-        try:
-            with open(path, "r") as f:
-                data = json.load(f)
-            raw = data["samples"]
-            if raw and len(raw[0]) >= 5:
-                samples = [(float(t), float(t1), float(t2), float(w1), float(w2))
-                           for t, t1, t2, w1, w2 in raw]
-            else:
-                # Older saved file from before velocity capture was added -
-                # estimate velocities from the recorded positions instead.
-                pos_samples = [(float(t), float(t1), float(t2)) for t, t1, t2 in raw]
-                samples = self._estimate_velocities_from_positions(pos_samples)
-            self.taught_trajectory = samples
-            total_t = samples[-1][0] if samples else 0.0
-            self.teach_info_label.text = "Taught trajectory: {:.1f}s, {} sample(s) (loaded from file).".format(
-                total_t, len(samples))
-            self.log("Loaded taught trajectory from {} ({} sample(s)).".format(path, len(samples)))
-        except Exception as e:
-            self.log("Failed to load taught trajectory: {}".format(e))
-            ui.notify("Load failed: {}".format(e), type="negative")
+            with ui.row().classes("w-full"):
+                self.vel_target_x = ui.number(label="Target X (mm)", value=0.0, format="%.2f").classes("flex-1")
+                self.vel_target_y = ui.number(label="Target Y (mm)", value=40.0, format="%.2f").classes("flex-1")
+            with ui.row().classes("w-full"):
+                ui.button("Set Target", on_click=self.set_velocity_target_from_inputs).classes("flex-1")
+                ui.button("Use Current EE", on_click=self.set_velocity_target_current).classes("flex-1")
+            self.vel_target_label = ui.label("No target set.").classes("text-xs")
+
+        self._sync_vel_subpanels()
 
     def build_cal_tab(self):
         ui.button("Clear Errors", on_click=self.clear_errors).classes("w-full")
@@ -2212,44 +913,45 @@ class FiveBarDashboard:
                       on_click=self.confirm_apply_spi_encoder_config, color="primary").classes("flex-1")
 
         ui.separator()
-        ui.label("Trajectory Limits (joint-space, software-limited)").classes("font-bold")
+        ui.label("Point-to-Point Move Limits (ODrive trapezoidal trajectory)").classes("font-bold")
         ui.label(
-            "Control rate is how often the background streaming thread writes "
-            "a new setpoint. Higher = smoother interpolation, but there's no "
-            "benefit past what your USB link / ODrive can keep up with; "
-            "100 Hz is a reasonable default."
+            "These joint limits are converted per-axis to motor turns and "
+            "written to trap_traj.config.vel_limit / accel_limit / decel_limit "
+            "before each Joint/IK move. They are clamped below each axis's "
+            "controller.config.vel_limit (the firmware hard cap - see PID "
+            "Tuning) so a move can't request an overspeed."
         ).classes("text-xs text-gray-500")
         self.cfg_max_vel = ui.number(label="Max joint velocity (deg/s)", value=self.traj_cfg["max_vel_deg_s"])
         self.cfg_max_accel = ui.number(label="Max joint acceleration (deg/s^2)",
                                         value=self.traj_cfg["max_accel_deg_s2"])
-        self.cfg_control_rate = ui.number(label="Control rate (Hz)", value=self.traj_cfg["control_rate_hz"])
 
+        ui.separator()
+        ui.label("Velocity Control Safety (Jacobian velocity mode)").classes("font-bold")
         ui.label(
-            "Input filter bandwidth (Hz) - firmware-side smoothing of "
-            "incoming position setpoints (INPUT_MODE_POS_FILTER). This is "
-            "what actually damps out the point-to-point jerkiness/ringing: "
-            "instead of the ODrive treating every ~100Hz software setpoint "
-            "write as a fresh step target, it runs its own critically-"
-            "damped filter toward the moving target at 8kHz. Lower = "
-            "smoother but laggier tracking; higher = snappier but closer "
-            "to the old jerky behavior. Try 2-5 Hz first."
+            "All of these bound what the velocity loop can command. The "
+            "watchdog is the key runaway guard: the ODrive idles itself if "
+            "this PC stops feeding it within the timeout. The joint speed cap "
+            "and acceleration (slew) cap bound joint motion directly; the "
+            "singularity thresholds (sigma_max of the inverse Jacobian, in "
+            "deg/mm) smoothly de-rate speed to zero as the arm nears a "
+            "singularity so it can't whip."
         ).classes("text-xs text-gray-500")
-        with ui.row().classes("w-full items-center"):
-            self.cfg_input_filter_bw = ui.number(
-                label="Input filter bandwidth (Hz)",
-                value=self.traj_cfg["input_filter_bandwidth_hz"], min=0.1, step=0.5).classes("flex-1")
-            ui.button("Apply Bandwidth Now", on_click=self.apply_input_filter_bandwidth_live).classes("flex-1")
-
-        ui.label(
-            "Motion profile - how acceleration is applied on point-to-point "
-            "moves (Joint/IK tabs). S-Curve ramps acceleration up and down "
-            "smoothly, which avoids the sharp jerk that tends to excite "
-            "ringing/oscillation on a fast move; Trapezoid snaps straight "
-            "to full acceleration and reaches speed slightly quicker."
-        ).classes("text-xs text-gray-500")
-        self.cfg_motion_profile = ui.toggle(
-            {"scurve": "S-Curve (smooth, recommended)", "trapezoid": "Trapezoid (legacy)"},
-            value=self.traj_cfg["motion_profile"])
+        self.cfg_vel_loop_hz = ui.number(label="Control loop rate (Hz)", value=self.vel_cfg["loop_hz"])
+        self.cfg_vel_joint_cap = ui.number(label="Joint velocity hard cap (deg/s)",
+                                            value=self.vel_cfg["joint_vel_cap_deg_s"])
+        self.cfg_vel_accel_cap = ui.number(label="Joint acceleration (slew) cap (deg/s^2)",
+                                            value=self.vel_cfg["joint_accel_cap_deg_s2"])
+        self.cfg_vel_cart_speed = ui.number(label="Max commanded EE speed (mm/s)",
+                                             value=self.vel_cfg["max_cart_speed_mm_s"])
+        self.cfg_vel_pos_kp = ui.number(label="Position-control P gain (1/s)", value=self.vel_cfg["pos_kp"])
+        self.cfg_vel_pos_tol = ui.number(label="Position-control arrive tolerance (mm)",
+                                          value=self.vel_cfg["pos_tol_mm"])
+        self.cfg_vel_manip_soft = ui.number(label="Singularity soft threshold (deg/mm, start slowing)",
+                                             value=self.vel_cfg["manip_soft_deg_mm"])
+        self.cfg_vel_manip_hard = ui.number(label="Singularity hard threshold (deg/mm, block)",
+                                             value=self.vel_cfg["manip_hard_deg_mm"])
+        self.cfg_vel_watchdog = ui.number(label="ODrive watchdog timeout (s)", value=self.vel_cfg["watchdog_s"])
+        self.cfg_vel_deadman = ui.number(label="Jog deadman timeout (s)", value=self.vel_cfg["deadman_s"])
 
         ui.button("Apply Config", on_click=self.apply_config).classes("w-full")
 
@@ -2260,8 +962,7 @@ class FiveBarDashboard:
             "Calibration tab) is auto-saved to {} next to this script "
             "whenever you apply it, so restarting THIS SCRIPT doesn't lose "
             "your geometry/gear/offset/home setup. This is separate from the "
-            "ODrive's own persistent calibration (Calibration tab), which "
-            "survives power-cycling the ODrive itself.".format(DASHBOARD_CONFIG_FILENAME)
+            "ODrive's own persistent calibration.".format(DASHBOARD_CONFIG_FILENAME)
         ).classes("text-xs text-gray-500")
         with ui.row().classes("w-full"):
             ui.button("Save Dashboard Settings Now", on_click=lambda: self.save_dashboard_config()).classes("flex-1")
@@ -2313,12 +1014,18 @@ class FiveBarDashboard:
                         if idx in self.home_angle_deg:
                             self.home_angle_deg[idx] = float(val)
                 else:
-                    # Backward-compat with older saved settings files from
-                    # before home_angle_deg was split per-axis: apply the
-                    # single old value to both axes.
                     self.home_angle_deg = {0: float(raw), 1: float(raw)}
+            # Only merge keys we still use, so an old v20 file (which also had
+            # control_rate_hz / motion_profile) loads cleanly without dragging
+            # dead settings back in.
             if "traj_cfg" in data:
-                self.traj_cfg.update(data["traj_cfg"])
+                for k in self.traj_cfg:
+                    if k in data["traj_cfg"]:
+                        self.traj_cfg[k] = data["traj_cfg"][k]
+            if "vel_cfg" in data:
+                for k in self.vel_cfg:
+                    if k in data["vel_cfg"]:
+                        self.vel_cfg[k] = data["vel_cfg"][k]
             if "display_cfg" in data:
                 self.display_cfg.update(data["display_cfg"])
             self._startup_messages.append("Loaded saved dashboard settings from {}.".format(path))
@@ -2327,10 +1034,8 @@ class FiveBarDashboard:
 
     def save_dashboard_config(self, silent=False):
         """Writes link geometry, axis gear/offset/direction, home reference
-        angle, and trajectory limits to a local JSON file so they survive
-        restarting this script (not just the ODrive). Called automatically
-        by Apply Config / Apply Home Angle / Capture Home, and available as
-        an explicit button too."""
+        angle, move limits and velocity-control safety settings to a local
+        JSON file so they survive restarting this script."""
         path = self._dashboard_config_path()
         data = {
             "params": self.params,
@@ -2338,6 +1043,7 @@ class FiveBarDashboard:
             "spi_cfg": {str(k): v for k, v in self.spi_cfg.items()},
             "home_angle_deg": {str(k): v for k, v in self.home_angle_deg.items()},
             "traj_cfg": self.traj_cfg,
+            "vel_cfg": self.vel_cfg,
             "display_cfg": self.display_cfg,
         }
         try:
@@ -2352,9 +1058,8 @@ class FiveBarDashboard:
                 ui.notify("Failed to save dashboard settings: {}".format(e), type="negative")
 
     def reload_dashboard_config(self):
-        """Re-reads the JSON file and pushes the values back into the
-        Config-tab fields (and home-angle field), in case you want to
-        discard in-memory edits and go back to what was last saved."""
+        """Re-reads the JSON file and pushes the values back into the Config
+        tab fields."""
         self._load_dashboard_config()
         self.cfg_L0.value = self.params["L0"]
         self.cfg_l1a.value = self.params["l1a"]
@@ -2376,9 +1081,16 @@ class FiveBarDashboard:
         self.cfg_spi_cs1.value = self.spi_cfg[1]["cs_gpio"]
         self.cfg_max_vel.value = self.traj_cfg["max_vel_deg_s"]
         self.cfg_max_accel.value = self.traj_cfg["max_accel_deg_s2"]
-        self.cfg_control_rate.value = self.traj_cfg["control_rate_hz"]
-        self.cfg_input_filter_bw.value = self.traj_cfg.get("input_filter_bandwidth_hz", 4.0)
-        self.cfg_motion_profile.value = self.traj_cfg.get("motion_profile", "scurve")
+        self.cfg_vel_loop_hz.value = self.vel_cfg["loop_hz"]
+        self.cfg_vel_joint_cap.value = self.vel_cfg["joint_vel_cap_deg_s"]
+        self.cfg_vel_accel_cap.value = self.vel_cfg["joint_accel_cap_deg_s2"]
+        self.cfg_vel_cart_speed.value = self.vel_cfg["max_cart_speed_mm_s"]
+        self.cfg_vel_pos_kp.value = self.vel_cfg["pos_kp"]
+        self.cfg_vel_pos_tol.value = self.vel_cfg["pos_tol_mm"]
+        self.cfg_vel_manip_soft.value = self.vel_cfg["manip_soft_deg_mm"]
+        self.cfg_vel_manip_hard.value = self.vel_cfg["manip_hard_deg_mm"]
+        self.cfg_vel_watchdog.value = self.vel_cfg["watchdog_s"]
+        self.cfg_vel_deadman.value = self.vel_cfg["deadman_s"]
         for msg in self._startup_messages:
             self.log(msg)
         self._startup_messages = []
@@ -2565,14 +1277,14 @@ class FiveBarDashboard:
             self.log("Move failed: {}".format(e))
 
     # ------------------------------------------------------------------
-    # Trajectory streaming (trapezoidal, joint-space, synchronized)
+    # Visualization update plumbing
     #
-    # The entire move streams from ONE background thread (one run.io_bound
-    # call covers the whole trajectory, not one per control-loop tick).
-    # Cancellation is via a threading.Event checked every tick (asyncio task
-    # cancellation can't interrupt a thread that's mid blocking-call), and
-    # viz updates are pushed through a small queue that the UI-thread timer
-    # drains, so the control loop itself never waits on NiceGUI/asyncio.
+    # Background threads (the trap-move monitor and the velocity control loop)
+    # can't touch NiceGUI elements directly, so they push the latest linkage
+    # pose through a small queue that the UI-thread timer (_drain_viz_queue)
+    # drains. Cancellation of those threads is via a threading.Event checked
+    # every tick (asyncio task cancellation can't interrupt a thread that's
+    # mid blocking-call).
     # ------------------------------------------------------------------
     def _push_viz_update(self, P1, P2, E, t1, t2):
         item = (P1, P2, E, t1, t2)
@@ -2614,286 +1326,616 @@ class FiveBarDashboard:
         except Exception:
             pass
 
-    def _stream_joint_trajectory_blocking(self, t1_start, t2_start, t1_target, t2_target, stop_event):
-        """
-        Runs entirely in a worker thread. Writes input_pos on an absolute
-        wall-clock schedule (start_perf + i*dt) rather than sleeping dt
-        after each write, so per-iteration compute/write jitter doesn't
-        accumulate into drift or visible stalling. Returns a status string
-        for the caller to log back on the UI thread.
-        """
-        d1 = t1_target - t1_start
-        d2 = t2_target - t2_start
-        vmax = self.traj_cfg["max_vel_deg_s"]
-        amax = self.traj_cfg["max_accel_deg_s2"]
-        rate = max(1.0, self.traj_cfg["control_rate_hz"])
-        dt = 1.0 / rate
+    # ------------------------------------------------------------------
+    # Live telemetry (position / velocity / current) plumbing
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _telemetry_chart_options(title, unit):
+        return {
+            "animation": False,
+            "grid": {"left": 50, "right": 14, "top": 30, "bottom": 26},
+            "title": {"text": title, "textStyle": {"fontSize": 12}},
+            "tooltip": {"trigger": "axis"},
+            "legend": {"data": ["axis0", "axis1"], "right": 10, "top": 4,
+                       "textStyle": {"fontSize": 10}},
+            "xAxis": {"type": "value", "name": "s", "min": "dataMin", "max": "dataMax",
+                      "axisLabel": {"fontSize": 9}},
+            "yAxis": {"type": "value", "name": unit, "scale": True,
+                      "axisLabel": {"fontSize": 9}},
+            "series": [
+                {"name": "axis0", "type": "line", "showSymbol": False, "data": []},
+                {"name": "axis1", "type": "line", "showSymbol": False, "data": []},
+            ],
+        }
 
-        T, pos1, pos2 = synchronized_two_axis_profile(
-            d1, d2, vmax, amax, profile=self.traj_cfg.get("motion_profile", "scurve"))
-        if T <= 0:
-            return "Trajectory: target already reached, nothing to do."
+    def _read_full_telemetry(self):
+        """Unlocked read of pos/vel/current for both axes. Call via
+        _locked_call (idle poll) or inside an existing lock block (threads)."""
+        a0, a1 = self.odrv0.axis0, self.odrv0.axis1
+        return (a0.encoder.pos_estimate, a1.encoder.pos_estimate,
+                a0.encoder.vel_estimate, a1.encoder.vel_estimate,
+                a0.motor.current_control.Iq_measured,
+                a1.motor.current_control.Iq_measured)
 
-        steps = max(1, int(math.ceil(T / dt)))
-        start_perf = time.perf_counter()
-
-        for i in range(steps + 1):
-            if stop_event.is_set():
-                return "Trajectory cancelled."
-
-            t_elapsed = min(i * dt, T)
-            t1 = t1_start + pos1(t_elapsed)
-            t2 = t2_start + pos2(t_elapsed)
-            turns0 = self.joint_deg_to_turns(0, t1)
-            turns1 = self.joint_deg_to_turns(1, t2)
-
-            try:
-                with self._odrv_lock:
-                    self.odrv0.axis0.controller.input_pos = turns0
-                    self.odrv0.axis1.controller.input_pos = turns1
-            except Exception as e:
-                return "Trajectory write failed, aborting: {}".format(e)
-
-            try:
-                E, P1, P2 = forward_kinematics(t1, t2, self.params)
-                self._push_viz_update(P1, P2, E, t1, t2)
-            except Exception:
-                pass
-
-            if t_elapsed >= T:
-                break
-
-            next_deadline = start_perf + (i + 1) * dt
-            sleep_for = next_deadline - time.perf_counter()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-
-        return "Trajectory segment complete."
-
-    async def _stream_joint_trajectory(self, t1_start, t2_start, t1_target, t2_target):
-        self.log("Streaming trajectory (single background thread, deadline-scheduled)...")
-        self._motion_active = True
-        self._motion_stop_event.clear()
+    def _enqueue_telemetry_from_turns(self, p0, p1, v0, v1, c0, c1):
+        """Convert raw ODrive readings to joint deg / deg-s + current and push
+        one timestamped sample onto the telemetry queue (drained by the UI)."""
+        t = time.perf_counter() - self._telem_t0
+        pos0 = self.turns_to_joint_deg(0, p0)
+        pos1 = self.turns_to_joint_deg(1, p1)
+        vel0 = self.turns_vel_to_joint_deg_vel(0, v0)
+        vel1 = self.turns_vel_to_joint_deg_vel(1, v1)
         try:
-            msg = await run.io_bound(
-                self._stream_joint_trajectory_blocking,
-                t1_start, t2_start, t1_target, t2_target, self._motion_stop_event
-            )
-            self.log(msg)
-        finally:
-            self._motion_active = False
+            self._telemetry_queue.put_nowait((t, pos0, pos1, vel0, vel1, c0, c1))
+        except queue.Full:
+            pass
 
-    def _stream_custom_trajectory_blocking(self, segments, stop_event):
-        """
-        Same architecture as _stream_joint_trajectory_blocking (one thread,
-        absolute-deadline scheduling) but plays back a chain of cubic
-        Hermite segments (each with its own start/end joint velocity)
-        instead of a single rest-to-rest trapezoid. The whole chain streams
-        as one continuous move - it only comes to rest where a segment's
-        boundary velocity is actually zero.
-        """
-        rate = max(1.0, self.traj_cfg["control_rate_hz"])
-        dt = 1.0 / rate
-        total_T = sum(seg["T"] for seg in segments)
-        if total_T <= 0:
-            return "Custom trajectory: zero total duration, nothing to do."
-
-        boundaries = []
-        acc = 0.0
-        for seg in segments:
-            boundaries.append((acc, acc + seg["T"], seg))
-            acc += seg["T"]
-
-        steps = max(1, int(math.ceil(total_T / dt)))
-        start_perf = time.perf_counter()
-
-        for i in range(steps + 1):
-            if stop_event.is_set():
-                return "Custom trajectory cancelled."
-
-            t_elapsed = min(i * dt, total_T)
-
-            seg = boundaries[-1][2]
-            seg_t = t_elapsed - boundaries[-1][0]
-            for seg_start, seg_end, s in boundaries:
-                if t_elapsed <= seg_end:
-                    seg = s
-                    seg_t = t_elapsed - seg_start
-                    break
-
-            t1 = hermite_pos(seg["t1_0"], seg["w1_0"], seg["t1_1"], seg["w1_1"], seg["T"], seg_t)
-            t2 = hermite_pos(seg["t2_0"], seg["w2_0"], seg["t2_1"], seg["w2_1"], seg["T"], seg_t)
-            turns0 = self.joint_deg_to_turns(0, t1)
-            turns1 = self.joint_deg_to_turns(1, t2)
-
+    def _drain_telemetry(self):
+        got = False
+        while True:
             try:
-                with self._odrv_lock:
-                    self.odrv0.axis0.controller.input_pos = turns0
-                    self.odrv0.axis1.controller.input_pos = turns1
-            except Exception as e:
-                return "Custom trajectory write failed, aborting: {}".format(e)
-
-            try:
-                E, P1, P2 = forward_kinematics(t1, t2, self.params)
-                self._push_viz_update(P1, P2, E, t1, t2)
-            except Exception:
-                pass
-
-            if t_elapsed >= total_T:
+                item = self._telemetry_queue.get_nowait()
+            except queue.Empty:
                 break
+            self._telemetry_buffer.append(item)
+            got = True
+        self._telem_refresh_counter = getattr(self, "_telem_refresh_counter", 0) + 1
+        # Refresh the charts at ~3 Hz (every 3rd 100 ms drain) when there's
+        # new data, to keep the browser update rate sane.
+        if got and (self._telem_refresh_counter % 3 == 0):
+            self._refresh_telemetry_charts()
 
-            next_deadline = start_perf + (i + 1) * dt
-            sleep_for = next_deadline - time.perf_counter()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
+    def _refresh_telemetry_charts(self):
+        buf = list(self._telemetry_buffer)
+        if not buf:
+            return
+        t_latest = buf[-1][0]
+        t_min = t_latest - self._telem_window_s
+        buf = [s for s in buf if s[0] >= t_min]
+        if not buf:
+            return
+        step = max(1, len(buf) // 300)
+        buf = buf[::step]
+        xs = [round(s[0], 3) for s in buf]
 
-        return "Custom trajectory complete."
+        def series(col):
+            return [[xs[i], round(buf[i][col], 4)] for i in range(len(buf))]
 
-    async def _stream_custom_trajectory(self, segments):
-        self.log("Streaming trajectory ({} segment(s), continuous Hermite blend - only stops "
-                  "where a segment boundary velocity is (0, 0))...".format(len(segments)))
-        self._motion_active = True
-        self._motion_stop_event.clear()
         try:
-            msg = await run.io_bound(
-                self._stream_custom_trajectory_blocking, segments, self._motion_stop_event
-            )
-            self.log(msg)
-        finally:
-            self._motion_active = False
+            self.chart_pos.options["series"][0]["data"] = series(1)
+            self.chart_pos.options["series"][1]["data"] = series(2)
+            self.chart_vel.options["series"][0]["data"] = series(3)
+            self.chart_vel.options["series"][1]["data"] = series(4)
+            self.chart_cur.options["series"][0]["data"] = series(5)
+            self.chart_cur.options["series"][1]["data"] = series(6)
+            self.chart_pos.update()
+            self.chart_vel.update()
+            self.chart_cur.update()
+        except Exception:
+            pass
 
-    async def _prepare_custom_segments(self):
-        """
-        Converts self.custom_waypoints (Cartesian x/y + arrival-time
-        'duration', and optionally a pinned vx/vy) into a list of
-        joint-space Hermite segments. Waypoints left on "auto" (the
-        default) get their through-velocity estimated automatically so the
-        arm glides through them; only waypoints the person explicitly
-        marked non-auto (e.g. for conveyor pick-ups) get their velocity
-        pinned to the Vx/Vy they typed. Returns None (after notifying the
-        user) if anything is unreachable/invalid.
-        """
-        if len(self.custom_waypoints) < 1:
-            ui.notify("Add at least one custom waypoint first.", type="warning")
-            return None
+    def _joint_dps_to_turns_per_s(self, axis_idx, dps):
+        """Joint velocity (deg/s) -> motor velocity (turns/s), signed, matching
+        the slope of joint_deg_to_turns for this axis."""
+        cfg = self.axis_cfg[axis_idx]
+        return dps * cfg["direction"] * cfg["gear_ratio"] / 360.0
 
-        params = self._current_ik_params()
-        joint_positions = []
-        fixed_vels = []  # one entry per custom waypoint (index 1..N of the chain)
-        for wp in self.custom_waypoints:
-            try:
-                t1, t2 = inverse_kinematics(wp["x"], wp["y"], params)
-            except Exception as e:
-                ui.notify("Custom waypoint error at ({:.2f}, {:.2f}): {}".format(wp["x"], wp["y"], e),
-                          type="negative")
-                return None
-            joint_positions.append((t1, t2))
-            if wp.get("auto", True):
-                fixed_vels.append(None)
+    # ------------------------------------------------------------------
+    # Point-to-point moves via the ODrive firmware trapezoidal planner
+    #
+    # We set trap_traj.config limits and write input_pos ONCE per axis; the
+    # firmware generates the profile. The two axes are time-synchronized by
+    # scaling the faster axis's vel/accel down so both finish together. A
+    # lightweight monitor thread only reads telemetry + drives the viz; it does
+    # NOT compute or stream the trajectory.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _solve_trap_scale(dist, vlim, alim, T_target):
+        """Find k in (0, 1] such that a trapezoid over `dist` with limits
+        (k*vlim, k*alim) takes T_target seconds. Duration decreases as k grows,
+        so we bisect. Used to stretch the faster axis to match the slower."""
+        def dur(k):
+            return _trapezoid_timing(dist, k * vlim, k * alim)[0]
+        if dur(1.0) >= T_target:
+            return 1.0
+        lo, hi = 1e-3, 1.0
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            if dur(mid) > T_target:
+                lo = mid
             else:
-                try:
-                    J = numerical_jacobian(wp["x"], wp["y"], params)
-                    w1, w2 = joint_velocity_from_cartesian(J, wp["vx"], wp["vy"])
-                except Exception as e:
-                    ui.notify("Custom waypoint velocity error at ({:.2f}, {:.2f}): {}".format(
-                        wp["x"], wp["y"], e), type="negative")
-                    return None
-                fixed_vels.append((w1, w2))
+                hi = mid
+        return 0.5 * (lo + hi)
 
-        if self.connected and self.odrv0 is not None:
+    def _trap_move_blocking(self, t1_target, t2_target, stop_event):
+        ax0, ax1 = self.odrv0.axis0, self.odrv0.axis1
+        try:
+            with self._odrv_lock:
+                cur0 = ax0.encoder.pos_estimate
+                cur1 = ax1.encoder.pos_estimate
+                ctrl_vlim0 = ax0.controller.config.vel_limit
+                ctrl_vlim1 = ax1.controller.config.vel_limit
+        except Exception as e:
+            return "Move: could not read start state: {}".format(e)
+
+        tgt0 = self.joint_deg_to_turns(0, t1_target)
+        tgt1 = self.joint_deg_to_turns(1, t2_target)
+        d0 = tgt0 - cur0
+        d1 = tgt1 - cur1
+
+        slope0 = abs(self.axis_cfg[0]["direction"]) * self.axis_cfg[0]["gear_ratio"] / 360.0
+        slope1 = abs(self.axis_cfg[1]["direction"]) * self.axis_cfg[1]["gear_ratio"] / 360.0
+        vmax = self.traj_cfg["max_vel_deg_s"]
+        amax = self.traj_cfg["max_accel_deg_s2"]
+        vlim0 = max(1e-4, vmax * slope0)
+        alim0 = max(1e-4, amax * slope0)
+        vlim1 = max(1e-4, vmax * slope1)
+        alim1 = max(1e-4, amax * slope1)
+        # Keep trap vel below the firmware hard cap so the move can't overspeed.
+        if ctrl_vlim0 and ctrl_vlim0 > 0:
+            vlim0 = min(vlim0, 0.95 * ctrl_vlim0)
+        if ctrl_vlim1 and ctrl_vlim1 > 0:
+            vlim1 = min(vlim1, 0.95 * ctrl_vlim1)
+
+        T0 = _trapezoid_timing(d0, vlim0, alim0)[0]
+        T1 = _trapezoid_timing(d1, vlim1, alim1)[0]
+        T = max(T0, T1)
+        if T <= 1e-6:
+            return "Move: target already reached, nothing to do."
+
+        if T0 < T and abs(d0) > 1e-9:
+            k = self._solve_trap_scale(d0, vlim0, alim0, T)
+            vlim0 *= k
+            alim0 *= k
+        if T1 < T and abs(d1) > 1e-9:
+            k = self._solve_trap_scale(d1, vlim1, alim1, T)
+            vlim1 *= k
+            alim1 *= k
+
+        try:
+            with self._odrv_lock:
+                for ax, vl, al in ((ax0, vlim0, alim0), (ax1, vlim1, alim1)):
+                    ax.trap_traj.config.vel_limit = vl
+                    ax.trap_traj.config.accel_limit = al
+                    ax.trap_traj.config.decel_limit = al
+                    ax.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
+                    ax.controller.config.input_mode = INPUT_MODE_TRAP_TRAJ
+                ax0.controller.input_pos = tgt0
+                ax1.controller.input_pos = tgt1
+        except Exception as e:
+            return "Move failed to start: {}".format(e)
+
+        rate = 50.0
+        dt = 1.0 / rate
+        timeout = T * 1.6 + 0.6
+        pos_tol = 0.01   # turns
+        vel_tol = 0.02   # turns/s
+        start = time.perf_counter()
+        i = 0
+        while True:
+            if stop_event.is_set():
+                try:
+                    with self._odrv_lock:
+                        h0 = ax0.encoder.pos_estimate
+                        h1 = ax1.encoder.pos_estimate
+                        ax0.controller.input_pos = h0
+                        ax1.controller.input_pos = h1
+                except Exception:
+                    pass
+                return "Move cancelled (holding current position)."
+
             try:
-                t1_cur, t2_cur = await self._get_current_joint_deg()
+                with self._odrv_lock:
+                    p0, p1, v0, v1, c0, c1 = self._read_full_telemetry()
+            except Exception as e:
+                return "Move read failed, aborting: {}".format(e)
+
+            t1d = self.turns_to_joint_deg(0, p0)
+            t2d = self.turns_to_joint_deg(1, p1)
+            try:
+                E, P1, P2 = forward_kinematics(t1d, t2d, self.params)
+                self._push_viz_update(P1, P2, E, t1d, t2d)
             except Exception:
-                t1_cur, t2_cur = joint_positions[0]
-        else:
-            t1_cur, t2_cur = joint_positions[0]
+                pass
+            self._enqueue_telemetry_from_turns(p0, p1, v0, v1, c0, c1)
 
-        chain = [(t1_cur, t2_cur)] + joint_positions
-        # The starting pose is always at rest; the rest of the chain is
-        # auto-estimated unless the person pinned a specific waypoint.
-        fixed = [(0.0, 0.0)] + fixed_vels
-        durations = [max(0.01, float(wp["duration"])) for wp in self.custom_waypoints]
+            elapsed = time.perf_counter() - start
+            done = (abs(p0 - tgt0) < pos_tol and abs(p1 - tgt1) < pos_tol
+                    and abs(v0) < vel_tol and abs(v1) < vel_tol)
+            if (done and elapsed > min(0.15, 0.5 * T)) or elapsed > timeout:
+                break
 
-        vmax = self.traj_cfg["max_vel_deg_s"]
-        amax = self.traj_cfg["max_accel_deg_s2"]
-        segments = build_hermite_chain(chain, durations, vmax, amax, fixed=fixed)
-        return segments
+            i += 1
+            sleep_for = (start + i * dt) - time.perf_counter()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
 
-    def _check_custom_segment_limits(self, segments, samples=40):
-        """Soft check only - logs warnings but never blocks, since matching
-        a real conveyor may genuinely require more speed than a generic
-        default limit."""
-        warnings_out = []
-        vmax = self.traj_cfg["max_vel_deg_s"]
-        amax = self.traj_cfg["max_accel_deg_s2"]
-        for idx, seg in enumerate(segments):
-            T = seg["T"]
-            peak_v = 0.0
-            peak_a = 0.0
-            prev_v1 = prev_v2 = prev_t = None
-            for s in range(samples + 1):
-                t = T * s / samples
-                v1 = hermite_vel(seg["t1_0"], seg["w1_0"], seg["t1_1"], seg["w1_1"], T, t)
-                v2 = hermite_vel(seg["t2_0"], seg["w2_0"], seg["t2_1"], seg["w2_1"], T, t)
-                peak_v = max(peak_v, abs(v1), abs(v2))
-                if prev_t is not None:
-                    dt_s = t - prev_t
-                    if dt_s > 1e-9:
-                        peak_a = max(peak_a, abs(v1 - prev_v1) / dt_s, abs(v2 - prev_v2) / dt_s)
-                prev_v1, prev_v2, prev_t = v1, v2, t
-            if peak_v > vmax:
-                warnings_out.append("Segment {}: peak joint velocity {:.1f} deg/s exceeds configured "
-                                     "max {:.1f} deg/s.".format(idx + 1, peak_v, vmax))
-            if peak_a > amax:
-                warnings_out.append("Segment {}: peak joint acceleration {:.1f} deg/s^2 exceeds "
-                                     "configured max {:.1f} deg/s^2.".format(idx + 1, peak_a, amax))
-        return warnings_out
+        return "Move complete (firmware trapezoidal, T~={:.2f}s).".format(T)
 
-    def _sample_custom_segments_for_viz(self, segments, samples_per_segment=20):
-        pts = []
-        for seg in segments:
-            T = seg["T"]
-            for s in range(samples_per_segment + 1):
-                t = T * s / samples_per_segment
-                t1 = hermite_pos(seg["t1_0"], seg["w1_0"], seg["t1_1"], seg["w1_1"], T, t)
-                t2 = hermite_pos(seg["t2_0"], seg["w2_0"], seg["t2_1"], seg["w2_1"], T, t)
+    async def _run_trap_move(self, t1_target, t2_target, marker_xy=None):
+        self.waypoints_viz = [marker_xy] if marker_xy is not None else []
+        self.velocity_viz = []
+        self.planned_path = []
+        self.log("Move: firmware trapezoidal trajectory (both axes synchronized)...")
+        self._motion_active = True
+        self._motion_stop_event.clear()
+        try:
+            msg = await run.io_bound(
+                self._trap_move_blocking, t1_target, t2_target, self._motion_stop_event)
+            self.log(msg)
+        finally:
+            self._motion_active = False
+
+    # ------------------------------------------------------------------
+    # Velocity control (real ODrive velocity mode + Jacobian), with the safety
+    # stack described at the top of the file.
+    # ------------------------------------------------------------------
+    def _on_vel_submode_change(self):
+        if self._vel_mode:
+            ui.notify("Stop velocity control before switching mode.", type="warning")
+            self.vel_submode_toggle.value = self._vel_submode
+            return
+        self._sync_vel_subpanels()
+
+    def _sync_vel_subpanels(self):
+        sub = self.vel_submode_toggle.value or "jog"
+        self.vel_jog_panel.set_visibility(sub == "jog")
+        self.vel_pos_panel.set_visibility(sub == "position")
+
+    def set_jog_velocity(self, vx, vy):
+        self._vel_cmd = {"vx": float(vx), "vy": float(vy)}
+        self._vel_cmd_time = time.perf_counter()
+
+    def jog_dir(self, dx, dy):
+        if not self._vel_mode or self._vel_submode != "jog":
+            ui.notify("Start velocity control in Jog mode first.", type="warning")
+            return
+        try:
+            speed = max(0.0, float(self.jog_speed_input.value))
+        except (TypeError, ValueError):
+            speed = 20.0
+        self.set_jog_velocity(dx * speed, dy * speed)
+
+    def jog_stop(self):
+        self.set_jog_velocity(0.0, 0.0)
+
+    def apply_jog_from_inputs(self):
+        if not self._vel_mode or self._vel_submode != "jog":
+            ui.notify("Start velocity control in Jog mode first.", type="warning")
+            return
+        try:
+            vx = float(self.jog_vx_input.value)
+            vy = float(self.jog_vy_input.value)
+        except (TypeError, ValueError):
+            ui.notify("Vx/Vy must be numbers.", type="negative")
+            return
+        self.set_jog_velocity(vx, vy)
+
+    def set_velocity_target_from_inputs(self):
+        try:
+            tx = float(self.vel_target_x.value)
+            ty = float(self.vel_target_y.value)
+        except (TypeError, ValueError):
+            ui.notify("Target X/Y must be numbers.", type="negative")
+            return
+        try:
+            inverse_kinematics(tx, ty, self._current_ik_params())
+        except Exception as e:
+            ui.notify("Target not reachable: {}".format(e), type="negative")
+            return
+        self._vel_target = (tx, ty)
+        self.waypoints_viz = [(tx, ty)]
+        self.vel_target_label.text = "Target set: X={:.2f}  Y={:.2f} mm".format(tx, ty)
+        self.log("Velocity position target set: ({:.2f}, {:.2f}) mm".format(tx, ty))
+
+    async def set_velocity_target_current(self):
+        if not self.require_connected():
+            return
+        try:
+            turns0, turns1 = await run.io_bound(self._locked_call, self._read_encoder_turns)
+            t1 = self.turns_to_joint_deg(0, turns0)
+            t2 = self.turns_to_joint_deg(1, turns1)
+            E, _, _ = forward_kinematics(t1, t2, self.params)
+            self.vel_target_x.value = round(E[0], 2)
+            self.vel_target_y.value = round(E[1], 2)
+            self.set_velocity_target_from_inputs()
+        except Exception as e:
+            self.log("Could not read current EE for target: {}".format(e))
+
+    def _enter_velocity_mode_blocking(self):
+        ax0, ax1 = self.odrv0.axis0, self.odrv0.axis1
+        wd = max(0.02, float(self.vel_cfg["watchdog_s"]))
+        try:
+            with self._odrv_lock:
+                self.odrv0.clear_errors()
+                for ax in (ax0, ax1):
+                    ax.controller.config.control_mode = CONTROL_MODE_VELOCITY_CONTROL
+                    ax.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+                    ax.controller.input_vel = 0.0
+                    ax.config.watchdog_timeout = wd
+                    ax.watchdog_feed()
+                    ax.config.enable_watchdog = True
+                    ax.watchdog_feed()
+                ax0.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
+                ax1.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
+                ax0.watchdog_feed()
+                ax1.watchdog_feed()
+        except Exception as e:
+            return False, "error arming velocity mode: {}".format(e)
+
+        time.sleep(0.05)
+        try:
+            with self._odrv_lock:
+                ax0.watchdog_feed()
+                ax1.watchdog_feed()
+                s0, s1 = ax0.current_state, ax1.current_state
+                e0, e1 = ax0.error, ax1.error
+        except Exception as e:
+            return False, "could not verify velocity mode: {}".format(e)
+
+        if s0 != AXIS_STATE_CLOSED_LOOP_CONTROL or s1 != AXIS_STATE_CLOSED_LOOP_CONTROL:
+            try:
+                with self._odrv_lock:
+                    for ax in (ax0, ax1):
+                        ax.config.enable_watchdog = False
+            except Exception:
+                pass
+            return False, ("axis did not enter closed loop (axis0 state={} err={}, "
+                           "axis1 state={} err={})".format(s0, e0, s1, e1))
+        return True, "ok"
+
+    def _exit_velocity_mode_blocking(self):
+        ax0, ax1 = self.odrv0.axis0, self.odrv0.axis1
+        try:
+            with self._odrv_lock:
+                ax0.controller.input_vel = 0.0
+                ax1.controller.input_vel = 0.0
+                ax0.watchdog_feed()
+                ax1.watchdog_feed()
+                h0 = ax0.encoder.pos_estimate
+                h1 = ax1.encoder.pos_estimate
+                for ax in (ax0, ax1):
+                    ax.config.enable_watchdog = False
+                    ax.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
+                    ax.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+                ax0.controller.input_pos = h0
+                ax1.controller.input_pos = h1
+        except Exception as e:
+            return "exit warning: {}".format(e)
+        return "zeroed velocity, disabled watchdog, holding position (position/passthrough)."
+
+    def _velocity_loop_blocking(self, params, submode, stop_event):
+        ax0, ax1 = self.odrv0.axis0, self.odrv0.axis1
+        rate = max(5.0, float(self.vel_cfg["loop_hz"]))
+        dt = 1.0 / rate
+        cap = float(self.vel_cfg["joint_vel_cap_deg_s"])
+        accel_cap = float(self.vel_cfg["joint_accel_cap_deg_s2"])
+        max_cart = float(self.vel_cfg["max_cart_speed_mm_s"])
+        kp = float(self.vel_cfg["pos_kp"])
+        pos_tol = float(self.vel_cfg["pos_tol_mm"])
+        msoft = float(self.vel_cfg["manip_soft_deg_mm"])
+        mhard = float(self.vel_cfg["manip_hard_deg_mm"])
+        deadman = float(self.vel_cfg["deadman_s"])
+
+        w1_prev = w2_prev = 0.0
+        start = time.perf_counter()
+        i = 0
+        err_check = 0
+        err_period = max(1, int(rate / 2))
+
+        while not stop_event.is_set():
+            try:
+                with self._odrv_lock:
+                    p0, p1, v0, v1, c0, c1 = self._read_full_telemetry()
+            except Exception:
+                self._vel_status = {"text": "velocity: read error - stopping",
+                                    "class": "text-red-600"}
+                break
+
+            t1d = self.turns_to_joint_deg(0, p0)
+            t2d = self.turns_to_joint_deg(1, p1)
+            try:
+                E, P1, P2 = forward_kinematics(t1d, t2d, self.params)
+                x, y = E
+                fk_ok = True
+            except Exception:
+                x = y = None
+                fk_ok = False
+
+            vx = vy = 0.0
+            status_txt = ""
+            status_cls = "text-green-700"
+
+            if fk_ok:
+                if submode == "jog":
+                    if (time.perf_counter() - self._vel_cmd_time) <= deadman:
+                        vx = self._vel_cmd.get("vx", 0.0)
+                        vy = self._vel_cmd.get("vy", 0.0)
+                    else:
+                        vx = vy = 0.0
+                        status_txt = "idle (deadman) - press a direction"
+                else:
+                    tgt = self._vel_target
+                    if tgt is not None:
+                        ex = tgt[0] - x
+                        ey = tgt[1] - y
+                        dist = math.hypot(ex, ey)
+                        if dist > pos_tol:
+                            speed = min(max_cart, kp * dist)
+                            vx = speed * ex / dist
+                            vy = speed * ey / dist
+                        else:
+                            vx = vy = 0.0
+                            status_txt = "at target (err {:.2f} mm)".format(dist)
+                    else:
+                        status_txt = "no target set"
+
+            cs = math.hypot(vx, vy)
+            if cs > max_cart and cs > 1e-9:
+                vx *= max_cart / cs
+                vy *= max_cart / cs
+
+            sigma = float("nan")
+            if fk_ok and (abs(vx) > 1e-9 or abs(vy) > 1e-9):
+                w1, w2, info = cartesian_to_joint_velocity(
+                    x, y, vx, vy, params, cap, msoft, mhard)
+                sigma = info.get("sigma_max", float("nan"))
+                if not info["ok"]:
+                    w1 = w2 = 0.0
+                    status_txt = ("blocked: " + info["reason"]) if submode == "position" \
+                        else info["reason"]
+                    status_cls = "text-red-600"
+                else:
+                    if info["derate"] < 1.0 or info["clamp"] < 1.0:
+                        status_cls = "text-orange-700"
+                    if not status_txt:
+                        status_txt = "moving" if info["reason"] == "ok" else info["reason"]
+            else:
+                w1 = w2 = 0.0
+                if not fk_ok:
+                    status_txt = "pose read (FK) unreachable - holding"
+                    status_cls = "text-orange-700"
+                elif not status_txt:
+                    status_txt = "holding"
+                    status_cls = "text-gray-500"
+
+            # Acceleration (slew) clamp on the commanded joint velocity.
+            max_dv = accel_cap * dt
+            w1 = max(w1_prev - max_dv, min(w1_prev + max_dv, w1))
+            w2 = max(w2_prev - max_dv, min(w2_prev + max_dv, w2))
+            # Final magnitude backstop.
+            w1 = max(-cap, min(cap, w1))
+            w2 = max(-cap, min(cap, w2))
+
+            tv0 = self._joint_dps_to_turns_per_s(0, w1)
+            tv1 = self._joint_dps_to_turns_per_s(1, w2)
+
+            try:
+                with self._odrv_lock:
+                    ax0.controller.input_vel = tv0
+                    ax1.controller.input_vel = tv1
+                    ax0.watchdog_feed()
+                    ax1.watchdog_feed()
+            except Exception:
+                self._vel_status = {"text": "velocity: write error - stopping",
+                                    "class": "text-red-600"}
+                break
+
+            w1_prev, w2_prev = w1, w2
+
+            if fk_ok:
                 try:
-                    E, _, _ = forward_kinematics(t1, t2, self.params)
-                    pts.append(E)
+                    self._push_viz_update(P1, P2, E, t1d, t2d)
                 except Exception:
                     pass
-        return pts
+            self._enqueue_telemetry_from_turns(p0, p1, v0, v1, c0, c1)
 
-    def _sample_path_for_viz(self, joint_waypoints, samples_per_segment=20):
-        """
-        Given a list of (theta1_deg, theta2_deg) waypoints, replays the same
-        trapezoidal profile used for actual execution and returns the
-        resulting end-effector (x, y) path for drawing - this reflects any
-        curvature caused by the linkage kinematics, not just a straight
-        Cartesian guess between waypoints.
-        """
-        pts = []
-        vmax = self.traj_cfg["max_vel_deg_s"]
-        amax = self.traj_cfg["max_accel_deg_s2"]
-        for i in range(len(joint_waypoints) - 1):
-            t1a, t2a = joint_waypoints[i]
-            t1b, t2b = joint_waypoints[i + 1]
-            d1 = t1b - t1a
-            d2 = t2b - t2a
-            T, pos1, pos2 = synchronized_two_axis_profile(
-                d1, d2, vmax, amax, profile=self.traj_cfg.get("motion_profile", "scurve"))
-            if T <= 0:
-                continue
-            for s in range(samples_per_segment + 1):
-                t = T * s / samples_per_segment
-                t1 = t1a + pos1(t)
-                t2 = t2a + pos2(t)
+            sig_txt = "sigma={:.2f}".format(sigma) if math.isfinite(sigma) else "sigma=--"
+            self._vel_status = {
+                "text": "velocity [{}]: {}  |  w=({:.1f}, {:.1f}) deg/s  {} deg/mm".format(
+                    submode, status_txt, w1, w2, sig_txt),
+                "class": status_cls,
+            }
+
+            err_check += 1
+            if err_check >= err_period:
+                err_check = 0
                 try:
-                    E, _, _ = forward_kinematics(t1, t2, self.params)
-                    pts.append(E)
+                    with self._odrv_lock:
+                        e0, e1 = ax0.error, ax1.error
+                        s0, s1 = ax0.current_state, ax1.current_state
+                    if (e0 or e1 or s0 != AXIS_STATE_CLOSED_LOOP_CONTROL
+                            or s1 != AXIS_STATE_CLOSED_LOOP_CONTROL):
+                        self._vel_status = {
+                            "text": ("velocity: ODrive fault / left closed loop "
+                                     "(axis0 err={} state={}, axis1 err={} state={}) - "
+                                     "stopping".format(e0, s0, e1, s1)),
+                            "class": "text-red-600"}
+                        break
                 except Exception:
                     pass
-        return pts
+
+            i += 1
+            sleep_for = (start + i * dt) - time.perf_counter()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+
+        try:
+            with self._odrv_lock:
+                ax0.controller.input_vel = 0.0
+                ax1.controller.input_vel = 0.0
+                ax0.watchdog_feed()
+                ax1.watchdog_feed()
+        except Exception:
+            pass
+        return "Velocity loop ended."
+
+    async def _run_velocity_control(self, submode):
+        self._vel_submode = submode
+        self._sync_vel_subpanels()
+        self._motion_active = True
+        self._vel_mode = True
+        self._vel_stop_event.clear()
+        self._vel_cmd = {"vx": 0.0, "vy": 0.0}
+        self._vel_cmd_time = 0.0
+        params = self._current_ik_params()
+
+        ok, msg = await run.io_bound(self._enter_velocity_mode_blocking)
+        if not ok:
+            self._vel_mode = False
+            self._motion_active = False
+            self.log("Velocity control could not start - " + msg)
+            ui.notify("Velocity control failed to start - " + msg, type="negative")
+            self._vel_status = {"text": "velocity: failed to start - " + msg,
+                                "class": "text-red-600"}
+            return
+
+        self.log("Velocity control started ({} mode). ODrive watchdog armed at "
+                 "{:.0f} ms.".format(submode, 1000.0 * self.vel_cfg["watchdog_s"]))
+        try:
+            result = await run.io_bound(
+                self._velocity_loop_blocking, params, submode, self._vel_stop_event)
+            self.log(result)
+        finally:
+            exit_msg = await run.io_bound(self._exit_velocity_mode_blocking)
+            self.log("Velocity control stopped - " + exit_msg)
+            self._vel_mode = False
+            self._motion_active = False
+            if self._vel_status.get("class") != "text-red-600":
+                self._vel_status = {"text": "velocity control: idle",
+                                    "class": "text-gray-500"}
+
+    async def start_velocity_control(self):
+        if not self.require_connected():
+            return
+        if self._vel_mode or (self._vel_task is not None and not self._vel_task.done()):
+            ui.notify("Velocity control is already running.", type="warning")
+            return
+        if self._motion_active:
+            ui.notify("A move is in progress - stop it first.", type="warning")
+            return
+        submode = self.vel_submode_toggle.value or "jog"
+        self._vel_task = asyncio.create_task(self._run_velocity_control(submode))
+
+    async def stop_velocity_control(self):
+        if not self._vel_mode and (self._vel_task is None or self._vel_task.done()):
+            ui.notify("Velocity control is not running.", type="info")
+            return
+        self._vel_stop_event.set()
+        if self._vel_task is not None:
+            try:
+                await self._vel_task
+            except asyncio.CancelledError:
+                pass
+
+    def _refresh_vel_status(self):
+        st = self._vel_status
+        try:
+            self.vel_status_label.text = st.get("text", "")
+            self.vel_status_label.classes(
+                replace="text-sm font-bold " + st.get("class", "text-gray-500"))
+        except Exception:
+            pass
 
     async def _launch_motion_task(self, coro):
         if self.motion_task is not None and not self.motion_task.done():
@@ -2907,19 +1949,28 @@ class FiveBarDashboard:
         return self.motion_task
 
     async def abort_motion(self):
-        if self._motion_active:
+        acted = False
+        if self._vel_mode or (self._vel_task is not None and not self._vel_task.done()):
+            self._vel_stop_event.set()
+            self.log("Stopping velocity control (will hold position).")
+            acted = True
+        if self._motion_active and not self._vel_mode:
             self._motion_stop_event.set()
-            self.log("Abort requested.")
-        elif self.motion_task is not None and not self.motion_task.done():
+            self.log("Aborting move.")
+            acted = True
+        if self.motion_task is not None and not self.motion_task.done():
             self.motion_task.cancel()
-            self.log("Abort requested.")
-        else:
+            acted = True
+        if not acted:
             self.log("No motion in progress.")
 
     # ------------------------------------------------------------------
     # Joint Control tab actions
     # ------------------------------------------------------------------
     async def move_joints_from_inputs(self):
+        if self._vel_mode:
+            ui.notify("Stop velocity control before commanding a point move.", type="warning")
+            return
         if not await self.require_closed_loop():
             return
         try:
@@ -2930,20 +1981,12 @@ class FiveBarDashboard:
             return
 
         try:
-            t1_start, t2_start = await self._get_current_joint_deg()
-        except Exception as e:
-            self.log("Could not read current position, aborting move: {}".format(e))
-            return
-
-        self.planned_path = self._sample_path_for_viz([(t1_start, t2_start), (t1_target, t2_target)])
-        try:
             E_target, _, _ = forward_kinematics(t1_target, t2_target, self.params)
-            self.waypoints_viz = [E_target]
+            marker = E_target
         except Exception:
-            self.waypoints_viz = []
-        self.velocity_viz = []
+            marker = None
 
-        await self._launch_motion_task(self._stream_joint_trajectory(t1_start, t2_start, t1_target, t2_target))
+        await self._launch_motion_task(self._run_trap_move(t1_target, t2_target, marker))
 
     async def move_raw_turns_from_inputs(self):
         try:
@@ -2976,6 +2019,9 @@ class FiveBarDashboard:
         self.log("IK computed for ({}, {}) -> theta1={:.2f}, theta2={:.2f}".format(x, y, t1, t2))
 
     async def compute_and_move_ik(self):
+        if self._vel_mode:
+            ui.notify("Stop velocity control before commanding a point move.", type="warning")
+            return
         if not await self.require_closed_loop():
             return
         try:
@@ -2987,18 +2033,7 @@ class FiveBarDashboard:
             self.log("IK error: {}".format(e))
             return
         self.ik_result_label.text = "theta1={:.2f} deg   theta2={:.2f} deg".format(t1_target, t2_target)
-
-        try:
-            t1_start, t2_start = await self._get_current_joint_deg()
-        except Exception as e:
-            self.log("Could not read current position, aborting move: {}".format(e))
-            return
-
-        self.planned_path = self._sample_path_for_viz([(t1_start, t2_start), (t1_target, t2_target)])
-        self.waypoints_viz = [(x, y)]
-        self.velocity_viz = []
-
-        await self._launch_motion_task(self._stream_joint_trajectory(t1_start, t2_start, t1_target, t2_target))
+        await self._launch_motion_task(self._run_trap_move(t1_target, t2_target, (x, y)))
 
     # ------------------------------------------------------------------
     # Forward kinematics actions
@@ -3029,250 +2064,6 @@ class FiveBarDashboard:
             self.viz.set_content(self.render_svg(P1, P2, E))
         except Exception as e:
             self.log("Read live angles failed: {}".format(e))
-
-    # ------------------------------------------------------------------
-    # Path Planning tab actions
-    # ------------------------------------------------------------------
-    def add_waypoint(self):
-        try:
-            x = float(self.path_x_input.value)
-            y = float(self.path_y_input.value)
-        except (TypeError, ValueError):
-            ui.notify("X/Y must be numbers.", type="negative")
-            return
-        try:
-            inverse_kinematics(x, y, self._current_ik_params())
-        except Exception as e:
-            ui.notify("Waypoint unreachable: {}".format(e), type="negative")
-            return
-        self.waypoints.append({"x": x, "y": y})
-        self._refresh_waypoints_list()
-        self.log("Added waypoint {}: ({:.2f}, {:.2f})".format(len(self.waypoints), x, y))
-
-    def remove_waypoint(self, idx):
-        if 0 <= idx < len(self.waypoints):
-            removed = self.waypoints.pop(idx)
-            self.log("Removed waypoint: ({:.2f}, {:.2f})".format(removed["x"], removed["y"]))
-            self._refresh_waypoints_list()
-
-    def clear_waypoints(self):
-        self.waypoints = []
-        self.planned_path = []
-        self.waypoints_viz = []
-        self.velocity_viz = []
-        self._refresh_waypoints_list()
-        self.log("Waypoints cleared.")
-
-    def _refresh_waypoints_list(self):
-        self.waypoints_container.clear()
-        with self.waypoints_container:
-            if not self.waypoints:
-                ui.label("(no waypoints yet)").classes("text-gray-500 text-sm")
-            for idx, wp in enumerate(self.waypoints):
-                with ui.row().classes("items-center gap-2"):
-                    ui.label("{}: ({:.2f}, {:.2f})".format(idx + 1, wp["x"], wp["y"]))
-                    ui.button(icon="delete", on_click=lambda i=idx: self.remove_waypoint(i)).props("flat dense")
-
-    def _build_path_planning_segments(self, t1_cur, t2_cur):
-        """
-        Converts self.waypoints (Cartesian X/Y only, no timing/velocity
-        input from the person) into ONE continuous joint-space Hermite
-        chain: durations are auto-estimated per leg from the configured
-        Max Velocity/Acceleration, and through-velocities at every interior
-        waypoint are auto-estimated too (see build_hermite_chain) so the
-        arm glides through them - it only comes to rest at the current
-        starting pose and at the final waypoint.
-        """
-        joint_targets = [inverse_kinematics(wp["x"], wp["y"], self._current_ik_params())
-                          for wp in self.waypoints]
-        chain = [(t1_cur, t2_cur)] + joint_targets
-        vmax = self.traj_cfg["max_vel_deg_s"]
-        amax = self.traj_cfg["max_accel_deg_s2"]
-        durations = [segment_duration_estimate(b[0] - a[0], b[1] - a[1], vmax, amax)
-                     for a, b in zip(chain, chain[1:])]
-        segments = build_hermite_chain(chain, durations, vmax, amax)
-        return segments
-
-    async def preview_path(self):
-        if len(self.waypoints) < 1:
-            ui.notify("Add at least one waypoint first.", type="warning")
-            return
-        if self.connected and self.odrv0 is not None:
-            try:
-                t1_cur, t2_cur = await self._get_current_joint_deg()
-            except Exception:
-                t1_cur, t2_cur = inverse_kinematics(
-                    self.waypoints[0]["x"], self.waypoints[0]["y"], self._current_ik_params())
-        else:
-            t1_cur, t2_cur = inverse_kinematics(
-                self.waypoints[0]["x"], self.waypoints[0]["y"], self._current_ik_params())
-
-        try:
-            segments = self._build_path_planning_segments(t1_cur, t2_cur)
-        except Exception as e:
-            ui.notify("Path error: {}".format(e), type="negative")
-            return
-
-        self.planned_path = self._sample_custom_segments_for_viz(segments)
-        self.waypoints_viz = [(wp["x"], wp["y"]) for wp in self.waypoints]
-        self.velocity_viz = []
-        self.viz.set_content(self.render_svg(None, None, None))
-        self.log("Path preview updated ({} waypoint(s), one continuous glide - "
-                  "not stopping at interior waypoints).".format(len(self.waypoints)))
-
-    async def run_path(self):
-        if not await self.require_closed_loop():
-            return
-        if len(self.waypoints) < 1:
-            ui.notify("Add at least one waypoint first.", type="warning")
-            return
-
-        try:
-            t1_cur, t2_cur = await self._get_current_joint_deg()
-        except Exception as e:
-            self.log("Could not read current position, aborting path: {}".format(e))
-            return
-
-        try:
-            segments = self._build_path_planning_segments(t1_cur, t2_cur)
-        except Exception as e:
-            self.log("Path planning error: {}".format(e))
-            ui.notify("Path planning error: {}".format(e), type="negative")
-            return
-
-        self.planned_path = self._sample_custom_segments_for_viz(segments)
-        self.waypoints_viz = [(wp["x"], wp["y"]) for wp in self.waypoints]
-        self.velocity_viz = []
-
-        self.log("Path: running {} waypoint(s) as one continuous glide "
-                  "(stops only at the last waypoint)...".format(len(self.waypoints)))
-        await self._launch_motion_task(self._stream_custom_trajectory(segments))
-
-    # ------------------------------------------------------------------
-    # Custom Trajectory tab actions
-    # ------------------------------------------------------------------
-    def _on_toggle_ct_auto_vel(self):
-        self.ct_manual_vel_row.visible = not bool(self.ct_auto_vel_checkbox.value)
-
-    def fill_conveyor_velocity(self):
-        try:
-            speed = float(self.conv_speed_input.value)
-            angle = float(self.conv_angle_input.value)
-        except (TypeError, ValueError):
-            ui.notify("Conveyor speed/direction must be numbers.", type="negative")
-            return
-        rad = math.radians(angle)
-        self.ct_vx_input.value = round(speed * math.cos(rad), 3)
-        self.ct_vy_input.value = round(speed * math.sin(rad), 3)
-        # Filling in a conveyor-matching velocity only makes sense for a
-        # waypoint that's going to actually use it, so switch to manual/pin
-        # mode automatically.
-        self.ct_auto_vel_checkbox.value = False
-        self._on_toggle_ct_auto_vel()
-        self.log("Filled Vx/Vy from conveyor: speed={:.2f} mm/s, direction={:.1f} deg "
-                  "-> Vx={:.2f}, Vy={:.2f}".format(speed, angle, self.ct_vx_input.value, self.ct_vy_input.value))
-
-    def add_custom_waypoint(self):
-        try:
-            x = float(self.ct_x_input.value)
-            y = float(self.ct_y_input.value)
-            duration = float(self.ct_duration_input.value)
-        except (TypeError, ValueError):
-            ui.notify("X, Y, and time must be numbers.", type="negative")
-            return
-        auto = bool(self.ct_auto_vel_checkbox.value)
-        vx = vy = 0.0
-        if not auto:
-            try:
-                vx = float(self.ct_vx_input.value)
-                vy = float(self.ct_vy_input.value)
-            except (TypeError, ValueError):
-                ui.notify("Vx/Vy must be numbers.", type="negative")
-                return
-        if duration <= 0:
-            ui.notify("Time from previous point must be greater than 0.", type="negative")
-            return
-        try:
-            inverse_kinematics(x, y, self._current_ik_params())
-        except Exception as e:
-            ui.notify("Waypoint unreachable: {}".format(e), type="negative")
-            return
-        self.custom_waypoints.append({"x": x, "y": y, "vx": vx, "vy": vy, "duration": duration, "auto": auto})
-        self._refresh_custom_waypoints_list()
-        if auto:
-            self.log("Added custom waypoint {}: pos=({:.2f}, {:.2f}), {:.3f}s from previous "
-                      "(auto velocity)".format(len(self.custom_waypoints), x, y, duration))
-        else:
-            self.log("Added custom waypoint {}: pos=({:.2f}, {:.2f}) pinned vel=({:.2f}, {:.2f}) mm/s, "
-                      "{:.3f}s from previous".format(len(self.custom_waypoints), x, y, vx, vy, duration))
-
-    def remove_custom_waypoint(self, idx):
-        if 0 <= idx < len(self.custom_waypoints):
-            removed = self.custom_waypoints.pop(idx)
-            self.log("Removed custom waypoint: ({:.2f}, {:.2f})".format(removed["x"], removed["y"]))
-            self._refresh_custom_waypoints_list()
-
-    def clear_custom_waypoints(self):
-        self.custom_waypoints = []
-        self.planned_path = []
-        self.waypoints_viz = []
-        self.velocity_viz = []
-        self._refresh_custom_waypoints_list()
-        self.log("Custom waypoints cleared.")
-
-    def _refresh_custom_waypoints_list(self):
-        self.custom_waypoints_container.clear()
-        with self.custom_waypoints_container:
-            if not self.custom_waypoints:
-                ui.label("(no custom waypoints yet)").classes("text-gray-500 text-sm")
-            for idx, wp in enumerate(self.custom_waypoints):
-                with ui.row().classes("items-center gap-2"):
-                    if wp.get("auto", True):
-                        ui.label("{}: pos=({:.2f}, {:.2f})  {:.3f}s  (auto velocity)".format(
-                            idx + 1, wp["x"], wp["y"], wp["duration"]))
-                    else:
-                        ui.label("{}: pos=({:.2f}, {:.2f})  pinned vel=({:.2f}, {:.2f}) mm/s  {:.3f}s".format(
-                            idx + 1, wp["x"], wp["y"], wp["vx"], wp["vy"], wp["duration"]))
-                    ui.button(icon="delete", on_click=lambda i=idx: self.remove_custom_waypoint(i)).props(
-                        "flat dense")
-
-    async def preview_custom_path(self):
-        segments = await self._prepare_custom_segments()
-        if segments is None:
-            return
-        warnings_out = self._check_custom_segment_limits(segments)
-        for w in warnings_out:
-            self.log("WARNING: " + w)
-        if warnings_out:
-            ui.notify("{} trajectory-limit warning(s) - see log.".format(len(warnings_out)), type="warning")
-
-        self.planned_path = self._sample_custom_segments_for_viz(segments)
-        self.waypoints_viz = [(wp["x"], wp["y"]) for wp in self.custom_waypoints]
-        self.velocity_viz = [(wp["x"], wp["y"], wp["vx"], wp["vy"])
-                              for wp in self.custom_waypoints if not wp.get("auto", True)]
-        self.viz.set_content(self.render_svg(None, None, None))
-        self.log("Custom path preview updated ({} waypoint(s), total duration {:.2f}s).".format(
-            len(self.custom_waypoints), sum(s["T"] for s in segments)))
-
-    async def run_custom_trajectory(self):
-        if not await self.require_closed_loop():
-            return
-        segments = await self._prepare_custom_segments()
-        if segments is None:
-            return
-        warnings_out = self._check_custom_segment_limits(segments)
-        for w in warnings_out:
-            self.log("WARNING: " + w)
-        if warnings_out:
-            ui.notify("{} trajectory-limit warning(s) - check log before trusting this move.".format(
-                len(warnings_out)), type="warning")
-
-        self.planned_path = self._sample_custom_segments_for_viz(segments)
-        self.waypoints_viz = [(wp["x"], wp["y"]) for wp in self.custom_waypoints]
-        self.velocity_viz = [(wp["x"], wp["y"], wp["vx"], wp["vy"])
-                              for wp in self.custom_waypoints if not wp.get("auto", True)]
-
-        await self._launch_motion_task(self._stream_custom_trajectory(segments))
 
     # ------------------------------------------------------------------
     # Calibration / homing / safety
@@ -3330,22 +2121,22 @@ class FiveBarDashboard:
         if not self.require_connected():
             return
 
-        bw_hz = max(0.1, float(self.traj_cfg.get("input_filter_bandwidth_hz", 4.0)))
-
         def _do():
+            try:
+                self.odrv0.axis0.config.enable_watchdog = False
+                self.odrv0.axis1.config.enable_watchdog = False
+            except Exception:
+                pass
             self.odrv0.axis0.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_POS_FILTER
-            self.odrv0.axis0.controller.config.input_filter_bandwidth = bw_hz
+            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
             self.odrv0.axis1.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_POS_FILTER
-            self.odrv0.axis1.controller.config.input_filter_bandwidth = bw_hz
+            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
             self.odrv0.axis0.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
             self.odrv0.axis1.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
 
         try:
             await run.io_bound(self._locked_call, _do)
-            self.log("Requested CLOSED_LOOP_CONTROL (position control, POS_FILTER input @ {:.2f} Hz) "
-                      "on both axes.".format(bw_hz))
+            self.log("Requested CLOSED_LOOP_CONTROL (position control, passthrough input) on both axes.")
         except Exception as e:
             self.log("Enable closed loop failed: {}".format(e))
 
@@ -3683,10 +2474,23 @@ class FiveBarDashboard:
         self.status_label.text = "Not connected (rebooting)"
         self.status_label.classes(remove="text-green-600", add="text-red-600")
 
+    def _on_key(self, e):
+        """Global keyboard handler (see ui.keyboard(...) in build_ui).
+        Fires on every keydown/keyup anywhere on the page, including while
+        an input/select/textarea has focus. Only Escape does anything."""
+        try:
+            is_escape = (e.key == "Escape") or getattr(e.key, "escape", False)
+        except Exception:
+            is_escape = False
+        if e.action.keydown and is_escape:
+            self.emergency_stop()
+            ui.notify("EMERGENCY STOP (Esc key)", type="negative", position="top")
+
     def emergency_stop(self):
         # Deliberately synchronous / not routed through run.io_bound so it
         # fires immediately even if other background operations are busy.
         self._motion_stop_event.set()
+        self._vel_stop_event.set()
         if self.motion_task is not None and not self.motion_task.done():
             self.motion_task.cancel()
         if not self.connected or self.odrv0 is None:
@@ -3700,6 +2504,13 @@ class FiveBarDashboard:
         try:
             self.odrv0.axis0.requested_state = AXIS_STATE_IDLE
             self.odrv0.axis1.requested_state = AXIS_STATE_IDLE
+            # Disable any velocity-mode watchdog so a later resume that isn't
+            # feeding it can't immediately re-trip the axis.
+            try:
+                self.odrv0.axis0.config.enable_watchdog = False
+                self.odrv0.axis1.config.enable_watchdog = False
+            except Exception:
+                pass
             self.log("EMERGENCY STOP: both axes set to IDLE. Both axes are now "
                       "un-powered - commanding a new move will NOT make them move "
                       "again until you press 'Resume After E-Stop' (or manually "
@@ -3732,16 +2543,17 @@ class FiveBarDashboard:
         self._motion_stop_event.clear()
         self._motion_active = False
 
-        bw_hz = max(0.1, float(self.traj_cfg.get("input_filter_bandwidth_hz", 4.0)))
-
         def _do():
             self.odrv0.clear_errors()
+            try:
+                self.odrv0.axis0.config.enable_watchdog = False
+                self.odrv0.axis1.config.enable_watchdog = False
+            except Exception:
+                pass
             self.odrv0.axis0.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_POS_FILTER
-            self.odrv0.axis0.controller.config.input_filter_bandwidth = bw_hz
+            self.odrv0.axis0.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
             self.odrv0.axis1.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_POS_FILTER
-            self.odrv0.axis1.controller.config.input_filter_bandwidth = bw_hz
+            self.odrv0.axis1.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
             self.odrv0.axis0.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
             self.odrv0.axis1.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
 
@@ -4090,9 +2902,17 @@ class FiveBarDashboard:
 
             self.traj_cfg["max_vel_deg_s"] = float(self.cfg_max_vel.value)
             self.traj_cfg["max_accel_deg_s2"] = float(self.cfg_max_accel.value)
-            self.traj_cfg["control_rate_hz"] = max(1.0, float(self.cfg_control_rate.value))
-            self.traj_cfg["input_filter_bandwidth_hz"] = max(0.1, float(self.cfg_input_filter_bw.value))
-            self.traj_cfg["motion_profile"] = self.cfg_motion_profile.value or "scurve"
+
+            self.vel_cfg["loop_hz"] = max(5.0, float(self.cfg_vel_loop_hz.value))
+            self.vel_cfg["joint_vel_cap_deg_s"] = float(self.cfg_vel_joint_cap.value)
+            self.vel_cfg["joint_accel_cap_deg_s2"] = float(self.cfg_vel_accel_cap.value)
+            self.vel_cfg["max_cart_speed_mm_s"] = float(self.cfg_vel_cart_speed.value)
+            self.vel_cfg["pos_kp"] = float(self.cfg_vel_pos_kp.value)
+            self.vel_cfg["pos_tol_mm"] = float(self.cfg_vel_pos_tol.value)
+            self.vel_cfg["manip_soft_deg_mm"] = float(self.cfg_vel_manip_soft.value)
+            self.vel_cfg["manip_hard_deg_mm"] = float(self.cfg_vel_manip_hard.value)
+            self.vel_cfg["watchdog_s"] = max(0.02, float(self.cfg_vel_watchdog.value))
+            self.vel_cfg["deadman_s"] = max(0.05, float(self.cfg_vel_deadman.value))
 
             self.log("Config applied.")
             ui.notify("Config applied.", type="positive")
@@ -4100,52 +2920,25 @@ class FiveBarDashboard:
         except (TypeError, ValueError) as e:
             ui.notify("Invalid config: {}".format(e), type="negative")
 
-    def _write_input_filter_bandwidth_blocking(self, bw_hz):
-        self.odrv0.axis0.controller.config.input_filter_bandwidth = bw_hz
-        self.odrv0.axis1.controller.config.input_filter_bandwidth = bw_hz
-
-    async def apply_input_filter_bandwidth_live(self):
-        """Pushes the Input filter bandwidth field straight to both axes'
-        controller.config.input_filter_bandwidth without needing to cycle
-        closed-loop control, so it can be tuned live while jogging/running a
-        path. Only takes effect on the ODrive while input_mode is already
-        POS_FILTER (set by Enable Closed Loop / Resume After E-Stop)."""
-        if not self.require_connected():
-            return
-        try:
-            bw_hz = max(0.1, float(self.cfg_input_filter_bw.value))
-        except (TypeError, ValueError) as e:
-            ui.notify("Invalid bandwidth: {}".format(e), type="negative")
-            return
-        self.traj_cfg["input_filter_bandwidth_hz"] = bw_hz
-        try:
-            await run.io_bound(self._locked_call, self._write_input_filter_bandwidth_blocking, bw_hz)
-            self.log("Input filter bandwidth set to {:.2f} Hz on both axes.".format(bw_hz))
-            ui.notify("Filter bandwidth applied: {:.2f} Hz".format(bw_hz), type="positive")
-            self.save_dashboard_config(silent=True)
-        except Exception as e:
-            self.log("Failed to apply input filter bandwidth: {}".format(e))
-            ui.notify("Failed to apply bandwidth: {}".format(e), type="negative")
-
     # ------------------------------------------------------------------
-    # Live polling loop
+    # Live polling loop (idle only - motion/velocity threads feed viz +
+    # telemetry directly while active)
     # ------------------------------------------------------------------
     async def poll_live(self):
         if not (self.connected and self.odrv0 is not None):
             return
         if self._motion_active:
-            # the trajectory thread is driving viz updates via _viz_queue at
-            # a higher rate; don't fight it with a slower/racier update here.
             return
         try:
-            turns0, turns1 = await run.io_bound(self._locked_call, self._read_encoder_turns)
-            t1 = self.turns_to_joint_deg(0, turns0)
-            t2 = self.turns_to_joint_deg(1, turns1)
+            p0, p1, v0, v1, c0, c1 = await run.io_bound(self._locked_call, self._read_full_telemetry)
+            t1 = self.turns_to_joint_deg(0, p0)
+            t2 = self.turns_to_joint_deg(1, p1)
             self.live_joint_label.text = "theta1={:.2f} deg   theta2={:.2f} deg".format(t1, t2)
 
             E, P1, P2 = forward_kinematics(t1, t2, self.params)
             self.ee_label.text = "End effector: X={:.2f} mm   Y={:.2f} mm".format(E[0], E[1])
             self.viz.set_content(self.render_svg(P1, P2, E))
+            self._enqueue_telemetry_from_turns(p0, p1, v0, v1, c0, c1)
         except Exception:
             pass  # unreachable pose / transient read error, skip this frame
 
@@ -4291,7 +3084,6 @@ class FiveBarDashboard:
 
         parts.append('</svg>')
         return "".join(parts)
-
 
 # ---------------------------------------------------------------------------
 # Entry point
