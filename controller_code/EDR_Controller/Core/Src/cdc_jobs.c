@@ -4,7 +4,7 @@
 #include "app_log.h"
 #include <stdlib.h>
 #include <string.h>
-
+#include <stdio.h>
 /* Single-producer (USB RX interrupt) / single-consumer (main loop) ring
    buffer. Safe without locks as long as the producer only ever advances
    s_tail (after fully writing the slot) and the consumer only ever
@@ -21,23 +21,29 @@ static volatile uint8_t s_count = 0;
 static char s_line_buf[LINE_BUF_SIZE];
 static uint8_t s_line_len = 0;
 
+#include "stm32h7xx_hal.h"  /* for __disable_irq/__enable_irq */
+
 static bool job_queue_push(float x, float y)
 {
-    if (s_count >= JOB_QUEUE_SIZE) return false;
+    __disable_irq();
+    if (s_count >= JOB_QUEUE_SIZE) { __enable_irq(); return false; }
     s_jobs[s_tail].x = x;
     s_jobs[s_tail].y = y;
     s_tail = (uint8_t)((s_tail + 1) % JOB_QUEUE_SIZE);
     s_count++;
+    __enable_irq();
     return true;
 }
 
 bool CdcJobs_Pop(pick_job_t *out)
 {
-    if (s_count == 0) return false;
+    __disable_irq();
+    if (s_count == 0) { __enable_irq(); return false; }
     out->x = s_jobs[s_head].x;
     out->y = s_jobs[s_head].y;
     s_head = (uint8_t)((s_head + 1) % JOB_QUEUE_SIZE);
     s_count--;
+    __enable_irq();
     return true;
 }
 
@@ -112,3 +118,19 @@ void CdcJobs_OnRxBytes(const uint8_t *data, uint32_t len)
         }
     }
 }
+
+void CdcJobs_InjectRaw(const char *str)
+{
+    CdcJobs_OnRxBytes((const uint8_t *)str, (uint32_t)strlen(str));
+}
+
+void CdcJobs_InjectLine(const char *line_without_newline)
+{
+    char buf[LINE_BUF_SIZE + 2];
+    int n = snprintf(buf, sizeof(buf), "%s\n", line_without_newline);
+    if (n > 0) {
+        CdcJobs_OnRxBytes((const uint8_t *)buf, (uint32_t)n);
+    }
+}
+
+

@@ -9,3 +9,4 @@
 ../Core/Src/odrive_link.c:96:6:ODriveLink_ReadAxisState	56	static
 ../Core/Src/odrive_link.c:106:6:ODriveLink_Ping	24	static
 ../Core/Src/odrive_link.c:114:6:ODriveLink_RequestClosedLoop	144	static
+../Core/Src/odrive_link.c:128:6:ODriveLink_RequestIdle	56	static

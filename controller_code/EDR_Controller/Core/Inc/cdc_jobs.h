@@ -18,4 +18,10 @@ bool CdcJobs_Pop(pick_job_t *out);
 
 uint8_t CdcJobs_PendingCount(void);
 
+void CdcJobs_InjectRaw(const char *str);
+
+/* Test helper: injects one complete "x,y" line - appends '\n' for you,
+   so you don't have to remember to add it in test code. */
+void CdcJobs_InjectLine(const char *line_without_newline);
+
 #endif

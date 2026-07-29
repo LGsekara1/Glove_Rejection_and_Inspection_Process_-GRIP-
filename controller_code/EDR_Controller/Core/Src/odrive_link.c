@@ -124,3 +124,10 @@ bool ODriveLink_RequestClosedLoop(uint8_t axis)
     ok &= ODriveLink_WriteIntProperty(state_prop, ODRIVE_AXIS_STATE_CLOSED_LOOP_CONTROL);
     return ok;
 }
+
+bool ODriveLink_RequestIdle(uint8_t axis)
+{
+    char state_prop[40];
+    snprintf(state_prop, sizeof(state_prop), "axis%u.requested_state", axis);
+    return ODriveLink_WriteIntProperty(state_prop, ODRIVE_AXIS_STATE_IDLE);
+}

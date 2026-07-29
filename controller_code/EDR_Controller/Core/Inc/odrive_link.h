@@ -23,5 +23,6 @@ bool ODriveLink_ReadProperty(const char *property, float *value_out);
 bool ODriveLink_ReadEncoderPos(uint8_t axis, float *turns_out);
 bool ODriveLink_ReadAxisState(uint8_t axis, int *state_out);
 bool ODriveLink_RequestClosedLoop(uint8_t axis);
+bool ODriveLink_RequestIdle(uint8_t axis);
 
 #endif

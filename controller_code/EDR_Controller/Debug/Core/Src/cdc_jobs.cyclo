@@ -1,6 +1,8 @@
-../Core/Src/cdc_jobs.c:24:13:job_queue_push	2
-../Core/Src/cdc_jobs.c:34:6:CdcJobs_Pop	2
-../Core/Src/cdc_jobs.c:44:9:CdcJobs_PendingCount	1
-../Core/Src/cdc_jobs.c:51:13:parse_line	6
-../Core/Src/cdc_jobs.c:67:13:handle_complete_line	8
-../Core/Src/cdc_jobs.c:97:6:CdcJobs_OnRxBytes	4
+../Core/Src/cdc_jobs.c:26:13:job_queue_push	2
+../Core/Src/cdc_jobs.c:38:6:CdcJobs_Pop	2
+../Core/Src/cdc_jobs.c:50:9:CdcJobs_PendingCount	1
+../Core/Src/cdc_jobs.c:57:13:parse_line	6
+../Core/Src/cdc_jobs.c:73:13:handle_complete_line	8
+../Core/Src/cdc_jobs.c:103:6:CdcJobs_OnRxBytes	4
+../Core/Src/cdc_jobs.c:122:6:CdcJobs_InjectRaw	1
+../Core/Src/cdc_jobs.c:127:6:CdcJobs_InjectLine	2

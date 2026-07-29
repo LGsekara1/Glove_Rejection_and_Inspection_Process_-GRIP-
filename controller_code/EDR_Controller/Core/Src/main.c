@@ -46,6 +46,8 @@
 #include "sequence.h"
 #include "cdc_jobs.h"
 
+#include "nextion_display.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -68,9 +70,7 @@
 /* USER CODE BEGIN PV */
 
 volatile uint8_t g_control_tick_flag = 0;
-static bool s_was_moving = false;
-
-
+//static bool s_was_moving = false;
 
 uint8_t buffer[1024];
 char msg[100];
@@ -97,21 +97,23 @@ const uint32_t SEND_INTERVAL_MS = 500; /* send a sample packet every 500ms */
 int16_t sampleX = 0;
 int16_t sampleY = 0;
 
+static sequence_step_t s_pick_place_sequence[] = { { .type = STEP_MOVE, .x =
+		30.0f, .y = 210.0f },
 
-static sequence_step_t s_pick_place_sequence[] = {
-    { .type = STEP_MOVE,  .x = 30.0f, .y = 210.0f },
+{ .type = STEP_GPIO, .port = MCU_Pneu_5_2_GPIO_Port, .pin = MCU_Pneu_5_2_Pin,
+		.pin_state = GPIO_PIN_SET }, { .type = STEP_DELAY, .delay_ms = 300 }, {
+		.type = STEP_GPIO, .port = MCU_Pneu_3_GPIO_Port, .pin = MCU_Pneu_3_Pin,
+		.pin_state = GPIO_PIN_SET }, { .type = STEP_DELAY, .delay_ms = 0 }, {
+		.type = STEP_GPIO, .port = MCU_Pneu_5_2_GPIO_Port, .pin =
+				MCU_Pneu_5_2_Pin, .pin_state = GPIO_PIN_RESET }, { .type =
+		STEP_DELAY, .delay_ms = 300 }, { .type = STEP_MOVE, .x = 0.0f, .y =
+		650.0f }, /* EDIT to the real drop location */
 
-    { .type = STEP_GPIO,  .port = MCU_Pneu_5_2_GPIO_Port, .pin = MCU_Pneu_5_2_Pin, .pin_state = GPIO_PIN_SET },
-    { .type = STEP_DELAY, .delay_ms = 1000 },
-    { .type = STEP_GPIO,  .port = MCU_Pneu_3_GPIO_Port,   .pin = MCU_Pneu_3_Pin,   .pin_state = GPIO_PIN_SET },
-    { .type = STEP_DELAY, .delay_ms = 1000 },
-    { .type = STEP_GPIO,  .port = MCU_Pneu_5_2_GPIO_Port, .pin = MCU_Pneu_5_2_Pin, .pin_state = GPIO_PIN_RESET },
-	{ .type = STEP_DELAY, .delay_ms = 1000 },
-    { .type = STEP_MOVE,  .x = 325.0f, .y = 560.0f }, /* EDIT to the real drop location */
-
-    { .type = STEP_GPIO,  .port = MCU_Pneu_3_GPIO_Port,   .pin = MCU_Pneu_3_Pin,   .pin_state = GPIO_PIN_RESET },
-};
+{ .type = STEP_GPIO, .port = MCU_Pneu_3_GPIO_Port, .pin = MCU_Pneu_3_Pin,
+		.pin_state = GPIO_PIN_RESET }, };
 #define PICK_PLACE_STEP_COUNT (sizeof(s_pick_place_sequence) / sizeof(s_pick_place_sequence[0]))
+
+static const uint8_t NX_TERM[3] = { 0xFF, 0xFF, 0xFF };
 
 //FDCAN_FilterTypeDef filter;
 //FDCAN_TxHeaderTypeDef txHeader;
@@ -165,6 +167,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim) {
 	}
 }
 
+static void nx_send(UART_HandleTypeDef *huart, const char *cmd) {
+	HAL_UART_Transmit(huart, (uint8_t*) cmd, strlen(cmd), 100);
+	HAL_UART_Transmit(huart, (uint8_t*) NX_TERM, 3, 100);
+}
 
 //--------for display--------------------
 //static void nx_send(UART_HandleTypeDef *huart, const char *cmd)
@@ -219,9 +225,6 @@ int main(void) {
 	MX_DMA_Init();
 	MX_QUADSPI_Init();
 	MX_RTC_Init();
-	MX_UART5_Init();
-	MX_USB_DEVICE_Init();
-	MX_UART7_Init();
 	MX_TIM6_Init();
 	/* USER CODE BEGIN 2 */
 
@@ -229,35 +232,46 @@ int main(void) {
 
 	HAL_Delay(6000);
 	HAL_GPIO_WritePin(Relay_EN_GPIO_Port, Relay_EN_Pin, GPIO_PIN_SET);
-	HAL_Delay(4000);
+	HAL_Delay(1000);
 	HAL_GPIO_WritePin(ODrive_NRST_GPIO_Port, ODrive_NRST_Pin, GPIO_PIN_RESET);
-	HAL_Delay(3000);
+	HAL_Delay(1000);
 	HAL_GPIO_WritePin(ODrive_NRST_GPIO_Port, ODrive_NRST_Pin, GPIO_PIN_SET);
+	HAL_Delay(1000);
+
+	MX_UART5_Init();
+	MX_USB_DEVICE_Init();
+	MX_UART7_Init();
+
+	NextionDisplay_Init(&huart7);
 
 	ODriveLink_Init(&huart5);
 	HAL_Delay(500);
 
 	motion_init_err_t init_err = Motion_Init();
 	if (init_err != MOTION_ERR_NONE) {
-	    cdc_log("Motion_Init failed: err=%d - aborting.\r\n", (int)init_err);
+		cdc_log("Motion_Init failed: err=%d - aborting.\r\n", (int) init_err);
 	} else {
-	    cdc_log("Motion_Init OK. Send \"x,y\" over this serial port to queue a pick.\r\n");
-	    HAL_TIM_Base_Start_IT(&htim6);
+		cdc_log(
+				"Motion_Init OK. Send \"x,y\" over this serial port to queue a pick.\r\n");
+		HAL_TIM_Base_Start_IT(&htim6);
 	}
 
-
+	static uint32_t s_last_dispay_poll = 0;
 
 	/* USER CODE END 2 */
 
 	/* Infinite loop */
 	/* USER CODE BEGIN WHILE */
-	while (1)
-	{
+	while (1) {
+//		if ((HAL_GetTick() - s_last_dispay_poll) >= 500) {
+//			s_last_dispay_poll = HAL_GetTick();
+//			NextionDisplay_PollOdriveState();
+//		}
 
-	    if (g_control_tick_flag) {
-	        g_control_tick_flag = 0;
-	        Motion_Update();
-	        Sequence_Update();
+		if (g_control_tick_flag) {
+			g_control_tick_flag = 0;
+			Motion_Update();
+			Sequence_Update();
 
 	        if (!Sequence_IsRunning()) {
 	            pick_job_t job;
@@ -269,7 +283,7 @@ int main(void) {
 	                Sequence_Start(s_pick_place_sequence, PICK_PLACE_STEP_COUNT);
 	            }
 	        }
-	    }
+		}
 	}
 	/* USER CODE END WHILE */
 
@@ -379,6 +393,8 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 
 		// Re-arm for the NEXT byte, every single time
 		HAL_UART_Receive_IT(&huart5, &uart5_rx_buf[uart5_rx_index], 1);
+	} else if (huart->Instance == UART7) {
+		NextionDisplay_UART_RxByteISR();
 	}
 
 //------------------Interrupt callback v2-----------------------
@@ -428,6 +444,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 uint32_t ODrive_Get_CAN_ID(uint8_t axis_id, uint32_t cmd_id) {
 	return ((uint32_t) axis_id << 5) | cmd_id;
 }
+
 
 /* USER CODE END 4 */
 

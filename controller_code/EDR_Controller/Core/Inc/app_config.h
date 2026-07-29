@@ -43,8 +43,8 @@ typedef struct {
    PROFILE_TRAPEZOID (legacy, reaches speed slightly quicker but with an
    instantaneous jerk at the start of each accel/decel ramp). */
 #define TRAJ_MOTION_PROFILE   PROFILE_SCURVE
-#define TRAJ_MAX_VEL_DEG_S     60.0f
-#define TRAJ_MAX_ACCEL_DEG_S2  120.0f
+#define TRAJ_MAX_VEL_DEG_S     200.0f //60.0f
+#define TRAJ_MAX_ACCEL_DEG_S2  400.0f //120.f
 #define TRAJ_CONTROL_RATE_HZ   100.0f   /* must match TIM6 ISR rate */
 
 /* ---------------- ODrive UART link ----------------------------- */
@@ -54,5 +54,8 @@ typedef struct {
 #define ODRIVE_AXIS_STATE_CLOSED_LOOP_CONTROL  8
 #define ODRIVE_CONTROL_MODE_POSITION_CONTROL   3
 #define ODRIVE_INPUT_MODE_PASSTHROUGH          1
+#define ODRIVE_AXIS_STATE_IDLE 1
+
+
 
 #endif /* APP_CONFIG_H */
