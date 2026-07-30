@@ -43,8 +43,8 @@ typedef struct {
    PROFILE_TRAPEZOID (legacy, reaches speed slightly quicker but with an
    instantaneous jerk at the start of each accel/decel ramp). */
 #define TRAJ_MOTION_PROFILE   PROFILE_SCURVE
-#define TRAJ_MAX_VEL_DEG_S     200.0f //60.0f
-#define TRAJ_MAX_ACCEL_DEG_S2  400.0f //120.f
+#define TRAJ_MAX_VEL_DEG_S     60.0f //60.0f
+#define TRAJ_MAX_ACCEL_DEG_S2  120.0f //120.f
 #define TRAJ_CONTROL_RATE_HZ   100.0f   /* must match TIM6 ISR rate */
 
 /* ---------------- ODrive UART link ----------------------------- */
@@ -56,6 +56,16 @@ typedef struct {
 #define ODRIVE_INPUT_MODE_PASSTHROUGH          1
 #define ODRIVE_AXIS_STATE_IDLE 1
 
+/* ---------------- Conveyor pick-timing ---------------- */
+#define CAMERA_TO_PICK_DISTANCE_MM   500.0f  /* EDIT: distance along travel direction, camera FOV -> pick point */
+#define CONVEYOR_VELOCITY_MM_S        80.0f  /* EDIT: fixed conveyor speed */
+#define PICK_TIME_OFFSET_MS             0    /* EDIT: tune empirically once picking live; +delays grab, -advances it */
+#define MIN_LEAD_TIME_MS             1500    /* warn (not block) if less than this much time before predicted arrival */
 
+/* Fixed pick / drop locations for the conveyor cycle */
+#define PICK_X_MM     0.0f
+#define PICK_Y_MM   400.0f
+#define DROP_X_MM   0.0f
+#define DROP_Y_MM   650.0f
 
 #endif /* APP_CONFIG_H */

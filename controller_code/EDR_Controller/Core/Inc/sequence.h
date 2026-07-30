@@ -4,11 +4,23 @@
 #include <stdbool.h>
 #include "stm32h7xx_hal.h"
 
+//typedef enum {
+//    STEP_MOVE,
+//    STEP_GPIO,
+//    STEP_DELAY,
+//} step_type_t;
+
+/* sequence.h - add to step_type_t and add one function */
 typedef enum {
     STEP_MOVE,
     STEP_GPIO,
     STEP_DELAY,
+    STEP_WAIT_UNTIL,   /* waits until an absolute local tick set via Sequence_SetWaitTarget() */
 } step_type_t;
+
+/* Call before Sequence_Start() if the sequence contains a STEP_WAIT_UNTIL -
+   sets the absolute HAL_GetTick() value that step will wait for. */
+void Sequence_SetWaitTarget(uint32_t target_tick_ms);
 
 typedef struct {
     step_type_t type;

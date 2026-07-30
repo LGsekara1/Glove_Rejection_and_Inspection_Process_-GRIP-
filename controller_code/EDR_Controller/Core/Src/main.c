@@ -97,22 +97,57 @@ const uint32_t SEND_INTERVAL_MS = 500; /* send a sample packet every 500ms */
 int16_t sampleX = 0;
 int16_t sampleY = 0;
 
-static sequence_step_t s_pick_place_sequence[] = { { .type = STEP_MOVE, .x =
-		30.0f, .y = 210.0f },
+/* USER CODE BEGIN PV */
 
+/* Existing debug/manual sequence (unchanged) - triggered by "x,y" lines
+ or CdcJobs_InjectLine(), still works exactly as before. */
+static sequence_step_t s_pick_place_sequence[] = {  { .type = STEP_MOVE, .x =
+		30.0f, .y = 210.0f }, /* pick - overwritten per debug job */
 { .type = STEP_GPIO, .port = MCU_Pneu_5_2_GPIO_Port, .pin = MCU_Pneu_5_2_Pin,
 		.pin_state = GPIO_PIN_SET }, { .type = STEP_DELAY, .delay_ms = 300 }, {
 		.type = STEP_GPIO, .port = MCU_Pneu_3_GPIO_Port, .pin = MCU_Pneu_3_Pin,
 		.pin_state = GPIO_PIN_SET }, { .type = STEP_DELAY, .delay_ms = 0 }, {
 		.type = STEP_GPIO, .port = MCU_Pneu_5_2_GPIO_Port, .pin =
-				MCU_Pneu_5_2_Pin, .pin_state = GPIO_PIN_RESET }, { .type =
-		STEP_DELAY, .delay_ms = 300 }, { .type = STEP_MOVE, .x = 0.0f, .y =
-		650.0f }, /* EDIT to the real drop location */
-
-{ .type = STEP_GPIO, .port = MCU_Pneu_3_GPIO_Port, .pin = MCU_Pneu_3_Pin,
-		.pin_state = GPIO_PIN_RESET }, };
+		MCU_Pneu_5_2_Pin, .pin_state = GPIO_PIN_RESET }, { .type = STEP_MOVE,
+		.x = DROP_X_MM, .y = DROP_Y_MM },
+		{ .type = STEP_GPIO, .port = MCU_Pneu_3_GPIO_Port,
+				.pin = MCU_Pneu_3_Pin, .pin_state = GPIO_PIN_RESET }, };
 #define PICK_PLACE_STEP_COUNT (sizeof(s_pick_place_sequence) / sizeof(s_pick_place_sequence[0]))
 
+/* New conveyor sequence - pick location is fixed (PICK_X_MM/PICK_Y_MM),
+ only the grab TIMING varies per job via Sequence_SetWaitTarget(). */
+static sequence_step_t s_conveyor_sequence[] = { { .type = STEP_MOVE, .x =
+PICK_X_MM, .y = PICK_Y_MM }, /* get there ASAP, max lead time */
+{ .type = STEP_WAIT_UNTIL }, /* wait for the scheduled grab instant */
+{ .type = STEP_GPIO, .port = MCU_Pneu_5_2_GPIO_Port, .pin = MCU_Pneu_5_2_Pin,
+		.pin_state = GPIO_PIN_SET }, { .type = STEP_DELAY, .delay_ms = 300 }, {
+		.type = STEP_GPIO, .port = MCU_Pneu_3_GPIO_Port, .pin = MCU_Pneu_3_Pin,
+		.pin_state = GPIO_PIN_SET }, { .type = STEP_DELAY, .delay_ms = 0 }, {
+		.type = STEP_GPIO, .port = MCU_Pneu_5_2_GPIO_Port, .pin =
+		MCU_Pneu_5_2_Pin, .pin_state = GPIO_PIN_RESET }, { .type = STEP_MOVE,
+		.x = DROP_X_MM, .y = DROP_Y_MM },
+		{ .type = STEP_GPIO, .port = MCU_Pneu_3_GPIO_Port,
+				.pin = MCU_Pneu_3_Pin, .pin_state = GPIO_PIN_RESET }, };
+#define CONVEYOR_SEQ_COUNT (sizeof(s_conveyor_sequence) / sizeof(s_conveyor_sequence[0]))
+/* USER CODE END PV */
+
+//////////////////////////////////
+//static sequence_step_t s_pick_place_sequence[] = { { .type = STEP_MOVE, .x =
+//		30.0f, .y = 210.0f },
+//
+//{ .type = STEP_GPIO, .port = MCU_Pneu_5_2_GPIO_Port, .pin = MCU_Pneu_5_2_Pin,
+//		.pin_state = GPIO_PIN_SET }, { .type = STEP_DELAY, .delay_ms = 300 }, {
+//		.type = STEP_GPIO, .port = MCU_Pneu_3_GPIO_Port, .pin = MCU_Pneu_3_Pin,
+//		.pin_state = GPIO_PIN_SET }, { .type = STEP_DELAY, .delay_ms = 0 }, {
+//		.type = STEP_GPIO, .port = MCU_Pneu_5_2_GPIO_Port, .pin =
+//				MCU_Pneu_5_2_Pin, .pin_state = GPIO_PIN_RESET }, { .type =
+//		STEP_DELAY, .delay_ms = 300 }, { .type = STEP_MOVE, .x = 0.0f, .y =
+//		650.0f }, /* EDIT to the real drop location */
+//
+//{ .type = STEP_GPIO, .port = MCU_Pneu_3_GPIO_Port, .pin = MCU_Pneu_3_Pin,
+//		.pin_state = GPIO_PIN_RESET }, };
+//#define PICK_PLACE_STEP_COUNT (sizeof(s_pick_place_sequence) / sizeof(s_pick_place_sequence[0]))
+//////////////////////////////////////////////
 static const uint8_t NX_TERM[3] = { 0xFF, 0xFF, 0xFF };
 
 //FDCAN_FilterTypeDef filter;
@@ -225,11 +260,13 @@ int main(void) {
 	MX_DMA_Init();
 	MX_QUADSPI_Init();
 	MX_RTC_Init();
+	MX_UART5_Init();
+	MX_USB_DEVICE_Init();
+	MX_UART7_Init();
 	MX_TIM6_Init();
 	/* USER CODE BEGIN 2 */
 
 	//Initial startup procedure
-
 	HAL_Delay(6000);
 	HAL_GPIO_WritePin(Relay_EN_GPIO_Port, Relay_EN_Pin, GPIO_PIN_SET);
 	HAL_Delay(1000);
@@ -268,23 +305,53 @@ int main(void) {
 //			NextionDisplay_PollOdriveState();
 //		}
 
+//		if (g_control_tick_flag) {
+//			g_control_tick_flag = 0;
+//			Motion_Update();
+//			Sequence_Update();
+//
+//	        if (!Sequence_IsRunning()) {
+//	            pick_job_t job;
+//	            if (CdcJobs_Pop(&job)) {
+//	                s_pick_place_sequence[0].x = job.x;
+//	                s_pick_place_sequence[0].y = job.y;
+//	                cdc_log("Dispatching pick-place for (%.2f, %.2f) [%d job(s) still queued]\r\n",
+//	                        (double)job.x, (double)job.y, (int)CdcJobs_PendingCount());
+//	                Sequence_Start(s_pick_place_sequence, PICK_PLACE_STEP_COUNT);
+//	            }
+//	        }
+//		}
+//	}
+
 		if (g_control_tick_flag) {
 			g_control_tick_flag = 0;
 			Motion_Update();
 			Sequence_Update();
 
-	        if (!Sequence_IsRunning()) {
-	            pick_job_t job;
-	            if (CdcJobs_Pop(&job)) {
-	                s_pick_place_sequence[0].x = job.x;
-	                s_pick_place_sequence[0].y = job.y;
-	                cdc_log("Dispatching pick-place for (%.2f, %.2f) [%d job(s) still queued]\r\n",
-	                        (double)job.x, (double)job.y, (int)CdcJobs_PendingCount());
-	                Sequence_Start(s_pick_place_sequence, PICK_PLACE_STEP_COUNT);
-	            }
-	        }
+			if (!Sequence_IsRunning()) {
+				/* Conveyor jobs are time-critical - always check and dispatch
+				 these before debug jobs. */
+				conveyor_job_t cjob;
+				pick_job_t djob;
+				if (CdcJobs_PopConveyorJob(&cjob)) {
+					Sequence_SetWaitTarget(cjob.arrival_local_ms);
+					cdc_log(
+							"Dispatching conveyor pick, grab scheduled at tick %lu [%d more queued]\r\n",
+							(unsigned long) cjob.arrival_local_ms,
+							(int) CdcJobs_ConveyorPendingCount());
+					Sequence_Start(s_conveyor_sequence, CONVEYOR_SEQ_COUNT);
+				} else if (CdcJobs_Pop(&djob)) {
+					s_pick_place_sequence[0].x = djob.x;
+					s_pick_place_sequence[0].y = djob.y;
+					cdc_log("Dispatching debug pick-place for (%.2f, %.2f)\r\n",
+							(double) djob.x, (double) djob.y);
+					Sequence_Start(s_pick_place_sequence,
+					PICK_PLACE_STEP_COUNT);
+				}
+			}
 		}
 	}
+
 	/* USER CODE END WHILE */
 
 	/* USER CODE BEGIN 3 */
@@ -445,7 +512,6 @@ uint32_t ODrive_Get_CAN_ID(uint8_t axis_id, uint32_t cmd_id) {
 	return ((uint32_t) axis_id << 5) | cmd_id;
 }
 
-
 /* USER CODE END 4 */
 
 /* MPU Configuration */
@@ -488,7 +554,6 @@ void Error_Handler(void) {
 	}
 	/* USER CODE END Error_Handler_Debug */
 }
-
 #ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number

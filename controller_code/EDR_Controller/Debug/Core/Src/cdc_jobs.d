@@ -1,6 +1,6 @@
 Core/Src/cdc_jobs.o: ../Core/Src/cdc_jobs.c ../Core/Inc/cdc_jobs.h \
  ../Core/Inc/kinematics.h ../Core/Inc/app_config.h \
- ../Core/Inc/trapezoid.h ../Core/Inc/app_log.h \
+ ../Core/Inc/trapezoid.h ../Core/Inc/app_config.h ../Core/Inc/app_log.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h \
  ../Core/Inc/stm32h7xx_hal_conf.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_rcc.h \
@@ -28,7 +28,6 @@ Core/Src/cdc_jobs.o: ../Core/Src/cdc_jobs.c ../Core/Inc/cdc_jobs.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_hsem.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_i2c.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_i2c_ex.h \
- ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_iwdg.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h \
  ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_qspi.h \
@@ -46,6 +45,7 @@ Core/Src/cdc_jobs.o: ../Core/Src/cdc_jobs.c ../Core/Inc/cdc_jobs.h \
 ../Core/Inc/kinematics.h:
 ../Core/Inc/app_config.h:
 ../Core/Inc/trapezoid.h:
+../Core/Inc/app_config.h:
 ../Core/Inc/app_log.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal.h:
 ../Core/Inc/stm32h7xx_hal_conf.h:
@@ -74,7 +74,6 @@ Core/Src/cdc_jobs.o: ../Core/Src/cdc_jobs.c ../Core/Inc/cdc_jobs.h \
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_hsem.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_i2c.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_i2c_ex.h:
-../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_iwdg.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_pwr_ex.h:
 ../Drivers/STM32H7xx_HAL_Driver/Inc/stm32h7xx_hal_qspi.h:
