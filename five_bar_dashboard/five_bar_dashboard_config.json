@@ -1,0 +1,85 @@
+{
+  "axes": {
+    "0": {
+      "direction": 1.0,
+      "gear_ratio": 1.0,
+      "offset_turns": -0.3650608
+    },
+    "1": {
+      "direction": 1.0,
+      "gear_ratio": 1.0,
+      "offset_turns": 0.0711055
+    }
+  },
+  "display": {
+    "auto_fit": true,
+    "px_per_mm": 1.0,
+    "show_workspace": true,
+    "telemetry_window_s": 20.0
+  },
+  "encoder_noise": {
+    "motion_deadband_turns_s": 0.003,
+    "motion_window_s": 0.4,
+    "position_median_window": 7,
+    "sync_hard_span_turns": 0.015,
+    "sync_max_drift_turns_s": 0.003,
+    "sync_noise_warning_span_turns": 0.003,
+    "sync_sample_duration_s": 1.5,
+    "sync_sample_hz": 60.0
+  },
+  "filters": {
+    "0": {
+      "cutoff_hz": 10.0,
+      "order": 2,
+      "type": "Moving Average",
+      "window": 5
+    },
+    "1": {
+      "cutoff_hz": 10.0,
+      "order": 2,
+      "type": "Moving Average",
+      "window": 5
+    }
+  },
+  "geometry": {
+    "L0": 300.0,
+    "elbow1": "up",
+    "elbow2": "down",
+    "fk_branch": "upper",
+    "l1a": 300.0,
+    "l1b": 300.0,
+    "l2a": 450.0,
+    "l2b": 450.0
+  },
+  "home_angle_deg": {
+    "0": 90.0,
+    "1": 90.0
+  },
+  "spi": {
+    "0": {
+      "cs_gpio": 4,
+      "mode": 257
+    },
+    "1": {
+      "cs_gpio": 3,
+      "mode": 257
+    }
+  },
+  "trajectory": {
+    "max_accel_deg_s2": 400.0,
+    "max_decel_deg_s2": 400.0,
+    "max_vel_deg_s": 200.0
+  },
+  "velocity": {
+    "deadman_s": 0.5,
+    "joint_accel_cap_deg_s2": 180.0,
+    "joint_vel_cap_deg_s": 45.0,
+    "loop_hz": 60.0,
+    "manip_hard_deg_mm": 8.0,
+    "manip_soft_deg_mm": 3.0,
+    "max_cart_speed_mm_s": 80.0,
+    "pos_kp": 3.0,
+    "pos_tol_mm": 1.0,
+    "watchdog_s": 0.15
+  }
+}
