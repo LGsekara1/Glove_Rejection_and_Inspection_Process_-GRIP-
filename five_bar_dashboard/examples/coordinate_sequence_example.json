@@ -1,0 +1,54 @@
+{
+  "format": "five-bar-cartesian-sequence-v3",
+  "repeat": 1,
+  "feedforward_enabled": false,
+  "editor_profile": {
+    "max_vel_deg_s": 45.0,
+    "max_accel_deg_s2": 100.0,
+    "max_decel_deg_s2": 80.0
+  },
+  "feedforward_editor": {
+    "velocity_ff0_turns_s": 0.0,
+    "velocity_ff1_turns_s": 0.0,
+    "torque_ff0_nm": 0.0,
+    "torque_ff1_nm": 0.0
+  },
+  "points": [
+    {
+      "x_mm": -60.0,
+      "y_mm": 430.0,
+      "dwell_s": 0.25,
+      "max_vel_deg_s": 35.0,
+      "max_accel_deg_s2": 80.0,
+      "max_decel_deg_s2": 60.0,
+      "velocity_ff0_turns_s": 0.0,
+      "velocity_ff1_turns_s": 0.0,
+      "torque_ff0_nm": 0.0,
+      "torque_ff1_nm": 0.0
+    },
+    {
+      "x_mm": 0.0,
+      "y_mm": 470.0,
+      "dwell_s": 0.25,
+      "max_vel_deg_s": 50.0,
+      "max_accel_deg_s2": 120.0,
+      "max_decel_deg_s2": 90.0,
+      "velocity_ff0_turns_s": 0.0,
+      "velocity_ff1_turns_s": 0.0,
+      "torque_ff0_nm": 0.0,
+      "torque_ff1_nm": 0.0
+    },
+    {
+      "x_mm": 60.0,
+      "y_mm": 430.0,
+      "dwell_s": 0.25,
+      "max_vel_deg_s": 30.0,
+      "max_accel_deg_s2": 70.0,
+      "max_decel_deg_s2": 50.0,
+      "velocity_ff0_turns_s": 0.0,
+      "velocity_ff1_turns_s": 0.0,
+      "torque_ff0_nm": 0.0,
+      "torque_ff1_nm": 0.0
+    }
+  ]
+}
